@@ -93,15 +93,18 @@ class MultiAgentTrainer:
 
     def train(self, total_timesteps: int, progress_bar: bool = True):
         """
-        Boucle d'entraînement principale
+        Main training loop
 
         Args:
-            total_timesteps: Steps totaux à effectuer (répartis sur tous les agents)
-            progress_bar: Afficher barre de progression
+            total_timesteps: Total steps to perform (distributed across agents)
+            progress_bar: Display progress bar (currently unused, reserved for future tqdm integration)
         """
+        # Note: progress_bar parameter reserved for future progress tracking implementation
+        # Currently logging is used instead of progress bars
+
         logger.info("")
         logger.info("=" * 70)
-        logger.info("🚀 DÉMARRAGE ENTRAÎNEMENT MULTI-AGENTS")
+        logger.info("🚀 STARTING MULTI-AGENT TRAINING")
         logger.info("=" * 70)
         logger.info(f"Total timesteps visés : {total_timesteps:,}")
         logger.info(f"Timesteps par agent : {total_timesteps // len(self.agents):,}")
@@ -153,26 +156,26 @@ class MultiAgentTrainer:
                         # Agent spécifique
                         agent = self.agents[agent_used]
 
-                        # Prédire pour obtenir value et log_prob
+                        # Predict value and log_prob (keep as tensors for buffer)
                         with torch.no_grad():
                             obs_tensor = self._obs_to_tensor(observations[env_idx], agent.device)
-
-                            # Prédire action (on a déjà l'action du scheduler, mais on a besoin des values)
                             action_tensor = torch.as_tensor([actions[env_idx]]).to(agent.device)
 
-                            # Calculer value et log_prob
+                            # Evaluate action - returns tensors
                             values, log_prob, _ = agent.policy.evaluate_actions(obs_tensor, action_tensor)
-                            values = values.cpu().numpy().flatten()
-                            log_prob = log_prob.cpu().numpy().flatten()
 
-                        # Ajouter au buffer
+                            # Keep as tensors but flatten (buffer expects 1D tensors)
+                            values = values.flatten()  # Remove .cpu().numpy()
+                            log_prob = log_prob.flatten()  # Remove .cpu().numpy()
+
+                        # Add to buffer (SB3 expects tensors, not numpy)
                         agent.rollout_buffer.add(
                             obs=observations[env_idx],
                             action=np.array([actions[env_idx]]),
                             reward=np.array([rewards[env_idx]]),
                             episode_start=np.array([dones[env_idx]]),
-                            value=values,
-                            log_prob=log_prob
+                            value=values,  # Now a tensor
+                            log_prob=log_prob  # Now a tensor
                         )
 
                         steps_collected[agent_used] += 1
@@ -191,22 +194,24 @@ class MultiAgentTrainer:
                         for aid in range(len(self.agents)):
                             agent = self.agents[aid]
 
-                            # Chaque agent stocke la transition
+                            # Each agent stores the transition (keep tensors for buffer)
                             with torch.no_grad():
                                 obs_tensor = self._obs_to_tensor(observations[env_idx], agent.device)
                                 action_tensor = torch.as_tensor([actions[env_idx]]).to(agent.device)
 
                                 values, log_prob, _ = agent.policy.evaluate_actions(obs_tensor, action_tensor)
-                                values = values.cpu().numpy().flatten()
-                                log_prob = log_prob.cpu().numpy().flatten()
+
+                                # Keep as tensors, just flatten
+                                values = values.flatten()  # Remove .cpu().numpy()
+                                log_prob = log_prob.flatten()  # Remove .cpu().numpy()
 
                             agent.rollout_buffer.add(
                                 obs=observations[env_idx],
                                 action=np.array([actions[env_idx]]),
                                 reward=np.array([rewards[env_idx]]),
                                 episode_start=np.array([dones[env_idx]]),
-                                value=values,
-                                log_prob=log_prob
+                                value=values,  # Now a tensor
+                                log_prob=log_prob  # Now a tensor
                             )
 
                             steps_collected[aid] += 1
@@ -228,14 +233,25 @@ class MultiAgentTrainer:
 
                 self.total_timesteps += self.env.num_envs
 
-                # Log périodique
+                # Periodic logging (replaces progress bar for now)
                 current_time = time.time()
                 if current_time - last_log_time > 10.0:
                     elapsed = current_time - start_time
                     fps = self.total_timesteps / elapsed
 
+                    # Calculate progress percentage
+                    progress_pct = (self.total_timesteps / total_timesteps) * 100
+
+                    # Simple text-based progress indicator (until tqdm integration)
+                    if progress_bar:
+                        # Show progress bar in logs
+                        bar_length = 30
+                        filled = int(bar_length * self.total_timesteps / total_timesteps)
+                        bar = '█' * filled + '░' * (bar_length - filled)
+                        logger.info(f"[{bar}] {progress_pct:.1f}%")
+
                     logger.info("")
-                    logger.info(f"📊 Progression : {self.total_timesteps:,}/{total_timesteps:,} steps")
+                    logger.info(f"📊 Progress: {self.total_timesteps:,}/{total_timesteps:,} steps")
                     logger.info(f"   FPS : {fps:.1f}")
                     logger.info(f"   Steps par agent : {dict(steps_collected)}")
                     logger.info(f"   Épisodes : {dict(episodes_done)}")
@@ -272,12 +288,12 @@ class MultiAgentTrainer:
                             f"Agent {agent_id} : Buffer non plein ({agent.rollout_buffer.pos}/{agent.rollout_buffer.buffer_size})")
                         continue
 
-                    # 2. Compute returns et advantages
+                    # 2. Compute returns and advantages
                     with torch.no_grad():
-                        # Calculer la dernière value pour bootstrap
+                        # Calculate last value for bootstrap
                         last_obs = agent.rollout_buffer.observations[-1]
                         if isinstance(last_obs, dict):
-                            # Dict obs → convertir en torch
+                            # Dict obs → convert to torch
                             last_obs_torch = {}
                             for key, value in last_obs.items():
                                 last_obs_torch[key] = torch.as_tensor(value).unsqueeze(0).to(agent.device)
@@ -285,11 +301,14 @@ class MultiAgentTrainer:
                             last_obs_torch = torch.as_tensor(last_obs).unsqueeze(0).to(agent.device)
 
                         last_values = agent.policy.predict_values(last_obs_torch)
-                        last_values = last_values.cpu().numpy().flatten()
 
-                    # Calculer advantages avec GAE
+                        # Keep as tensor (compute_returns_and_advantage accepts both)
+                        # But flatten to 1D
+                        last_values = last_values.flatten()  # Remove .cpu().numpy()
+
+                    # Calculate advantages with GAE (accepts tensors)
                     agent.rollout_buffer.compute_returns_and_advantage(
-                        last_values=last_values,
+                        last_values=last_values,  # Now a tensor
                         dones=agent.rollout_buffer.episode_starts[-1]
                     )
 

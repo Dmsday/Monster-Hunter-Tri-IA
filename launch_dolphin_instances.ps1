@@ -188,15 +188,10 @@ function Save-LauncherConfig {
 }
 
 # ==============================================================================
-# PATH VALIDATION
+# PATH VALIDATION - SILENT MODE FOR PYTHON
 # ==============================================================================
-Write-Host "==================================================================" -ForegroundColor Cyan
-Write-Host "CONFIGURATION VALIDATION" -ForegroundColor Cyan
-Write-Host "==================================================================" -ForegroundColor Cyan
-Write-Host "Dolphin.exe: $($Config.DolphinPath)" -ForegroundColor White
-Write-Host "User Folder: $($Config.UserFolder)" -ForegroundColor White
-Write-Host "ROM File   : $($Config.RomPath)" -ForegroundColor White
-Write-Host ""
+# When called from Python with -NoGUI, validation must not block
+# Write minimal output and exit with error code only
 
 $ValidationErrors = @()
 
@@ -213,6 +208,18 @@ if (-not (Test-Path $Config.RomPath)) {
 }
 
 if ($ValidationErrors.Count -gt 0) {
+    # In NoGUI mode (Python), write errors to stderr and exit silently
+    if ($NoGUI) {
+        foreach ($ErrorMsg in $ValidationErrors) {
+            Write-Error $ErrorMsg
+        }
+        exit 1
+    }
+    
+    # In GUI mode (manual), show full error message
+    Write-Host "==================================================================" -ForegroundColor Cyan
+    Write-Host "CONFIGURATION VALIDATION" -ForegroundColor Cyan
+    Write-Host "==================================================================" -ForegroundColor Cyan
     Write-Host "VALIDATION ERRORS:" -ForegroundColor Red
     foreach ($ErrorMsg in $ValidationErrors) {
         Write-Host "  - $ErrorMsg" -ForegroundColor Red
@@ -227,6 +234,20 @@ if ($ValidationErrors.Count -gt 0) {
     Write-Host "                                     -RomFilePath 'C:\Path\To\ROM.rvz'" -ForegroundColor Yellow
     Write-Host "==================================================================" -ForegroundColor Cyan
     exit 1
+}
+
+# Only show validation success in GUI mode
+if (-not $NoGUI) {
+    Write-Host "==================================================================" -ForegroundColor Cyan
+    Write-Host "CONFIGURATION VALIDATION" -ForegroundColor Cyan
+    Write-Host "==================================================================" -ForegroundColor Cyan
+    Write-Host "Dolphin.exe: $($Config.DolphinPath)" -ForegroundColor White
+    Write-Host "User Folder: $($Config.UserFolder)" -ForegroundColor White
+    Write-Host "ROM File   : $($Config.RomPath)" -ForegroundColor White
+    Write-Host ""
+    Write-Host "All paths validated successfully!" -ForegroundColor Green
+    Write-Host "==================================================================" -ForegroundColor Cyan
+    Write-Host ""
 }
 
 Write-Host "All paths validated successfully!" -ForegroundColor Green
@@ -897,9 +918,9 @@ if ($profiles.Count -eq 0) {
 
 Write-Host "Profils detectes : $($profiles.Count)" -ForegroundColor Green
 
-# MODE AUTOMATIQUE (appelé depuis Python)
+# AUTOMATIC MODE (called from Python)
 if ($NumInstances -gt 0 -and $NoGUI) {
-    Write-Host "Mode automatique : $NumInstances instances" -ForegroundColor Cyan
+    Write-Host "Automatic mode: $NumInstances instances" -ForegroundColor Cyan
     
     $options = @{
         Count = [Math]::Min($NumInstances, $profiles.Count)
@@ -908,71 +929,146 @@ if ($NumInstances -gt 0 -and $NoGUI) {
         MinimizeDolphin = $MinimizeDolphin
         MinimizeGame = $MinimizeGame
     }
+    
+    # Check and create missing User folders
+    Write-Host ""
+    Write-Host "Checking User profiles for $NumInstances instances..." -ForegroundColor Cyan
+    
+    $RequiredProfiles = $NumInstances
+    $AvailableProfiles = $profiles.Count
+    
+    if ($AvailableProfiles -lt $RequiredProfiles) {
+        Write-Host ""
+        Write-Host "======================================================================" -ForegroundColor Yellow
+        Write-Host "INSUFFICIENT USER PROFILES - AUTO-CREATING" -ForegroundColor Yellow
+        Write-Host "======================================================================" -ForegroundColor Yellow
+        Write-Host "  Requested instances : $RequiredProfiles" -ForegroundColor White
+        Write-Host "  Available profiles  : $AvailableProfiles" -ForegroundColor White
+        Write-Host "  Missing profiles    : $($RequiredProfiles - $AvailableProfiles)" -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "Creating missing User folders from base User folder..." -ForegroundColor Cyan
+        Write-Host "======================================================================" -ForegroundColor Yellow
+        Write-Host ""
+        
+        # Use the first profile as base (usually "User")
+        $BaseUserFolder = $profiles[0].Path
+        
+        # Call Initialize-UserProfiles function
+        $ProfilesCreated = Initialize-UserProfiles -NumInstances $RequiredProfiles -BaseUserFolder $BaseUserFolder
+        
+        if (-not $ProfilesCreated) {
+            Write-Host ""
+            Write-Host "CRITICAL ERROR: Failed to create User profiles" -ForegroundColor Red
+            Write-Host ""
+            Write-Host "MANUAL SOLUTION:" -ForegroundColor Yellow
+            Write-Host "  1. Navigate to Dolphin directory:" -ForegroundColor Yellow
+            Write-Host "     $(Split-Path -Parent $Config.DolphinPath)" -ForegroundColor Gray
+            Write-Host "  2. Copy the 'User' folder" -ForegroundColor Yellow
+            Write-Host "  3. Rename copies to: User1, User2, User3..." -ForegroundColor Yellow
+            Write-Host "  4. Run training script again" -ForegroundColor Yellow
+            Write-Host ""
+            
+            # Write error to stderr so Python can detect it
+            Write-Error "Failed to auto-create User profiles in NoGUI mode"
+            exit 1
+        }
+        
+        # Re-scan profiles after creation
+        Write-Host "Re-scanning User profiles after creation..." -ForegroundColor Cyan
+        $profiles = Get-UserProfiles
+        Write-Host "Total profiles now available: $($profiles.Count)" -ForegroundColor Green
+        Write-Host ""
+        
+        # Update $options with the new number of profiles
+        $options.Count = [Math]::Min($NumInstances, $profiles.Count)
+        
+        # Final check
+        if ($profiles.Count -lt $RequiredProfiles) {
+            Write-Host "ERROR: Still insufficient profiles after auto-creation" -ForegroundColor Red
+            Write-Host "  Required : $RequiredProfiles" -ForegroundColor Yellow
+            Write-Host "  Available: $($profiles.Count)" -ForegroundColor Yellow
+            Write-Error "Profile auto-creation incomplete"
+            exit 1
+        }
+        
+        Write-Host "User profiles ready: $($profiles.Count) profiles available" -ForegroundColor Green
+        Write-Host ""
+    }
+    else {
+        Write-Host "User profiles check: OK ($AvailableProfiles profiles available)" -ForegroundColor Green
+        Write-Host ""
+    }
 }
-# MODE INTERACTIF (manuel)
+# INTERACTIVE MODE (manual)
 else {
-    # Afficher dialogue
+    # Show dialog
     $options = Show-LauncherDialog -Profiles $profiles
     if ($null -eq $options) {
-        Write-Host "Operation annulee" -ForegroundColor Yellow
+        Write-Host "Operation canceled" -ForegroundColor Yellow
         exit 0
     }
 }
 
-# ==============================================================================
-# AUTO-CREATE MISSING USER PROFILES
-# ==============================================================================
-$RequiredProfiles = $options.Count
-$AvailableProfiles = $profiles.Count
 
-if ($AvailableProfiles -lt $RequiredProfiles) {
-    Write-Host ""
-    Write-Host "======================================================================" -ForegroundColor Yellow
-    Write-Host "INSUFFICIENT USER PROFILES" -ForegroundColor Yellow
-    Write-Host "======================================================================" -ForegroundColor Yellow
-    Write-Host "  Requested instances : $RequiredProfiles" -ForegroundColor White
-    Write-Host "  Available profiles  : $AvailableProfiles" -ForegroundColor White
-    Write-Host ""
-    Write-Host "Auto-creating missing User profiles..." -ForegroundColor Cyan
-    Write-Host "======================================================================" -ForegroundColor Yellow
-    Write-Host ""
-    
-    # Use the first profile as base (should be "User")
-    $BaseUserFolder = $profiles[0].Path
-    
-    $ProfilesCreated = Initialize-UserProfiles -NumInstances $RequiredProfiles -BaseUserFolder $BaseUserFolder
-    
-    if (-not $ProfilesCreated) {
+# ==============================================================================
+# AUTO-CREATE MISSING USER PROFILES (GUI MODE ONLY)
+# ==============================================================================
+# Note: NoGUI mode handles profile creation earlier in the script
+
+# Only execute this section if in GUI mode (NoGUI flag not set)
+if (-not $NoGUI) {
+    $RequiredProfiles = $options.Count
+    $AvailableProfiles = $profiles.Count
+
+    if ($AvailableProfiles -lt $RequiredProfiles) {
         Write-Host ""
-        Write-Host "CRITICAL ERROR: Failed to create User profiles" -ForegroundColor Red
+        Write-Host "======================================================================" -ForegroundColor Yellow
+        Write-Host "INSUFFICIENT USER PROFILES (GUI MODE)" -ForegroundColor Yellow
+        Write-Host "======================================================================" -ForegroundColor Yellow
+        Write-Host "  Requested instances : $RequiredProfiles" -ForegroundColor White
+        Write-Host "  Available profiles  : $AvailableProfiles" -ForegroundColor White
         Write-Host ""
-        Write-Host "MANUAL SOLUTION:" -ForegroundColor Yellow
-        Write-Host "  1. Navigate to Dolphin directory:" -ForegroundColor Yellow
-        Write-Host "     $(Split-Path -Parent $Config.DolphinPath)" -ForegroundColor Gray
-        Write-Host "  2. Copy the 'User' folder" -ForegroundColor Yellow
-        Write-Host "  3. Rename copies to: User1, User2, User3..." -ForegroundColor Yellow
-        Write-Host "  4. Run this script again" -ForegroundColor Yellow
+        Write-Host "Auto-creating missing User profiles..." -ForegroundColor Cyan
+        Write-Host "======================================================================" -ForegroundColor Yellow
         Write-Host ""
-        exit 1
+        
+        # Use the first profile as base (should be "User")
+        $BaseUserFolder = $profiles[0].Path
+        
+        $ProfilesCreated = Initialize-UserProfiles -NumInstances $RequiredProfiles -BaseUserFolder $BaseUserFolder
+        
+        if (-not $ProfilesCreated) {
+            Write-Host ""
+            Write-Host "CRITICAL ERROR: Failed to create User profiles" -ForegroundColor Red
+            Write-Host ""
+            Write-Host "MANUAL SOLUTION:" -ForegroundColor Yellow
+            Write-Host "  1. Navigate to Dolphin directory:" -ForegroundColor Yellow
+            Write-Host "     $(Split-Path -Parent $Config.DolphinPath)" -ForegroundColor Gray
+            Write-Host "  2. Copy the 'User' folder" -ForegroundColor Yellow
+            Write-Host "  3. Rename copies to: User1, User2, User3..." -ForegroundColor Yellow
+            Write-Host "  4. Run this script again" -ForegroundColor Yellow
+            Write-Host ""
+            exit 1
+        }
+        
+        # Re-scan profiles after creation
+        Write-Host "Re-scanning User profiles..." -ForegroundColor Cyan
+        $profiles = Get-UserProfiles
+        Write-Host "Profiles after auto-creation: $($profiles.Count)" -ForegroundColor Green
+        Write-Host ""
+        
+        # Final verification
+        if ($profiles.Count -lt $RequiredProfiles) {
+            Write-Host "ERROR: Still missing profiles after auto-creation" -ForegroundColor Red
+            Write-Host "  Required : $RequiredProfiles" -ForegroundColor Yellow
+            Write-Host "  Available: $($profiles.Count)" -ForegroundColor Yellow
+            exit 1
+        }
     }
-    
-    # Re-scan profiles after creation
-    Write-Host "Re-scanning User profiles..." -ForegroundColor Cyan
-    $profiles = Get-UserProfiles
-    Write-Host "Profiles after auto-creation: $($profiles.Count)" -ForegroundColor Green
-    Write-Host ""
-    
-    # Final verification
-    if ($profiles.Count -lt $RequiredProfiles) {
-        Write-Host "ERROR: Still missing profiles after auto-creation" -ForegroundColor Red
-        Write-Host "  Required : $RequiredProfiles" -ForegroundColor Yellow
-        Write-Host "  Available: $($profiles.Count)" -ForegroundColor Yellow
-        exit 1
+    else {
+        Write-Host ""
+        Write-Host "User profiles check: OK ($AvailableProfiles profiles available)" -ForegroundColor Green
     }
-}
-else {
-    Write-Host ""
-    Write-Host "User profiles check: OK ($AvailableProfiles profiles available)" -ForegroundColor Green
 }
 
 # Copier config si demande

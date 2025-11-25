@@ -86,6 +86,7 @@ class GeneticTrainer:
                 try:
                     if len(step_result) == 5:
                         # Gymnasium format: obs, reward, terminated, truncated, info
+                        # noinspection PyTypeChecker,PyTupleAssignmentBalance
                         obs, reward, terminated, truncated, info = step_result
                     elif len(step_result) == 4:
                         # Legacy format: obs, reward, done, info

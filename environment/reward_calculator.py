@@ -1130,52 +1130,51 @@ class MonsterHunterRewardCalculator:
             self.reward_breakdown_detailed['other.buffed_stamina_bonus'] = stamina_bonus
             info['stamina_buffed'] = True
 
-        # 15. PÉNALITÉ MORT
+        # 15. DEATH PENALTY
         death_count = current_state.get('death_count', 0) or 0
 
         if prev_state and self.prev_death_count is not None:
-            # Appliquer le malus SEULEMENT si death_count a CHANGÉ
+            # Apply penalty ONLY if death_count has CHANGED
             if death_count > self.prev_death_count:
-                # Calculer malus de base
+                # Compute base penalty
                 base_death_penalty = self.PENALTY_DEATH_BASE * (1 + 0.5 * death_count)
 
-                # Réduction selon dégâts infligés
+                # Reduction based on damage dealt
                 damage_reduction_factor = self._calculate_death_penalty_reduction()
                 final_death_penalty = base_death_penalty * (1.0 - damage_reduction_factor)
 
-                # Appliquer immédiatement (AVANT 3ème mort)
+                # Apply immediately (BEFORE 3rd death)
                 reward -= final_death_penalty
                 self.reward_breakdown['death'] -= final_death_penalty
-                # Détail
+                # Details
                 self.reward_breakdown_detailed['penalties.death_penalty'] = -final_death_penalty
 
                 info['player_died'] = True
                 info['death_number'] = death_count
                 info['death_penalty'] = final_death_penalty
 
-                # Si 3ème mort, signaler à l'environnement qu'il doit se terminer
+                # Signal to environment that episode should terminate after 3rd death
                 if death_count >= 3:
-                    info['quest_failed'] = True
                     info['death_count'] = death_count
                     info['critical_death'] = True
-                    logger.info(f"💀💀💀 3ÈME MORT - QUEST FAILED")
-                    logger.info(f"Pénalité finale appliquée: -{final_death_penalty:.2f}")
+                    logger.info(f"💀💀💀 3RD DEATH - EPISODE WILL TERMINATE")
+                    logger.info(f"Final penalty applied: -{final_death_penalty:.2f}")
                 else:
-                    logger.info(f"💀 JOUEUR MORT #{death_count}")
-                    logger.info(f"Pénalité de base: {base_death_penalty:.2f}")
-                    logger.info(f"Réduction: {damage_reduction_factor:.1%}")
-                    logger.info(f"Pénalité finale: -{final_death_penalty:.2f}")
+                    logger.info(f"💀 PLAYER DIED #{death_count}")
+                    logger.info(f"Base penalty: {base_death_penalty:.2f}")
+                    logger.info(f"Reduction: {damage_reduction_factor:.1%}")
+                    logger.info(f"Final penalty: -{final_death_penalty:.2f}")
 
-                # Toujours mettre à jour death_count pour prochain step
+                # Always update death_count for the next step
                 info['death_count'] = death_count
 
-                # Reset stats camp
+                # Reset camp stats
                 self.camp_entry_time = None
                 self.camp_penalty_triggered = False
                 self.last_camp_penalty_period = 0
                 self.just_died = True
         else:
-            #Initialiser si première lecture
+            # Initialize if first read
             self.prev_death_count = death_count
 
         # 16. COMPORTEMENT - MALUS IMMOBILITÉ

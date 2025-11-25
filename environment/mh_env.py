@@ -171,13 +171,23 @@ class MonsterHunterEnv(gym.Env):
 
         # --- 1. MEMORY EN PREMIER (car state_fusion en dépend) ---
         # TOUJOURS INITIALISER MEMORY (pour rewards), même si use_memory=False
-        if use_memory or True:  # Toujours init memory pour rewards
+        if use_memory or True:  # Always init memory for rewards
             try:
                 self.memory = MemoryReader(
                     force_quest_mode=True,
                     async_mode=True,
                     read_frequency=100,
                 )
+
+                # Check memory is actually available
+                if self.memory is None:
+                    logger.error("CRITICAL: MemoryReader returned None")
+                    logger.error("Possible causes:")
+                    logger.error("  1. Dolphin not running")
+                    logger.error("  2. Dolphin not started as admin")
+                    logger.error("  3. Game not loaded")
+                    raise RuntimeError("MemoryReader initialization failed")
+
                 logger.info("Memory reader en mode asynchrone (lecture rewards)")
 
                 # Si use_memory=False, on lit quand meme pour les rewards
@@ -196,18 +206,27 @@ class MonsterHunterEnv(gym.Env):
         # --- 2. VISION ENSUITE ---
         if use_vision:
             try:
-                # Forcer PrintWindow si rtvision active pour stabilite
+                # Force PrintWindow if rtvision active for stability
                 force_pw = self.rt_vision or self.rt_minimap
+
+                # MULTI-INSTANCE : Pass expected window title
+                expected_title = f"MHTri-{self.instance_id}" if self.instance_id >= 0 else None
+
                 self.frame_capture = FrameCapture(
                     target_fps=30,
-                    force_printwindow=force_pw
+                    force_printwindow=force_pw,
+                    instance_id=self.instance_id,
+                    expected_window_title=expected_title
                 )
+
                 self.preprocessor = FramePreprocessor(
                     target_size=frame_size,
                     grayscale=grayscale,
                     frame_stack=frame_stack,
                 )
+
                 logger.info("Vision initialisée")
+
             except Exception as vision_error:
                 logger.error(f"ERREUR vision: {vision_error}")
                 self.use_vision = False
@@ -215,8 +234,9 @@ class MonsterHunterEnv(gym.Env):
                 self.frame_capture = None
                 self.preprocessor = None
 
-        # Vérification capture fenêtre correcte (multi-instance)
-        if self.instance_id > 0 and self.frame_capture:
+        # Verify window title matches expected format
+        # Expected: MHTri-0, MHTri-1, MHTri-2...
+        if self.frame_capture:
             try:
                 window_title = self.get_window_title()
                 expected_title = f"MHTri-{self.instance_id}"
@@ -251,21 +271,34 @@ class MonsterHunterEnv(gym.Env):
             self.reward_calc = MonsterHunterRewardCalculator()
             logger.info("Reward calculator avancé activé")
 
-            # Attacher au MemoryReader
-            if self.use_memory is not None:
+            # Attach to MemoryReader with validation
+            if self.memory is not None:  # Check self.memory, not use_memory
                 self.memory.reward_calc = self.reward_calc
-                logger.info("RewardCalculator attaché au MemoryReader")
+                logger.info("RewardCalculator attached to MemoryReader")
 
-                # Vérifier que le tracker existe
+                # Verify tracker exists
                 if hasattr(self.reward_calc, 'exploration_tracker'):
                     tracker = self.reward_calc.exploration_tracker
                     total_cubes = sum(len(cubes) for cubes in tracker.cubes_by_zone.values())
                     logger.info(
-                        f"📦 Exploration tracker actif : {total_cubes} cubes dans {len(tracker.cubes_by_zone)} zones")
+                        f"Exploration tracker active: {total_cubes} cubes in {len(tracker.cubes_by_zone)} zones")
                 else:
-                    logger.warning("Exploration tracker non trouvé dans RewardCalculator!")
+                    logger.warning("Exploration tracker not found in RewardCalculator!")
             else:
-                logger.error("MemoryReader non disponible - RewardCalculator non attaché")
+                logger.error("CRITICAL: MemoryReader is None - rewards will not work")
+                logger.error("Possible causes:")
+                logger.error("  1. Dolphin not running")
+                logger.error("  2. Memory reading failed during initialization")
+                logger.error("  3. Game not loaded")
+                logger.error("")
+                logger.error("SOLUTION: Start Dolphin and load Monster Hunter Tri before training")
+
+                # Raise exception to stop initialization cleanly
+                raise RuntimeError(
+                    "MemoryReader initialization failed. "
+                    "Ensure Dolphin is running with Monster Hunter Tri loaded."
+                )
+
         else:
             self.reward_calc = None
 
@@ -529,19 +562,20 @@ class MonsterHunterEnv(gym.Env):
             logger.debug(f"Cooldown terminé")
 
         # RELOAD SAVE STATE
-        # Vérifier que memory existe (pas use_memory, mais self.memory)
+        # Check if memory exists (not use_memory flag, but actual self.memory instance)
         if self.auto_reload_save_state and self.memory is not None:
-            logger.debug(f"Vérification état du jeu avant reset...")
+            logger.debug("Checking game state before reset...")
             try:
-                current_state = self.memory.read_game_state()
-                current_map = current_state.get('current_map')
-                death_count = current_state.get('death_count', 0) or 0
-                quest_time = current_state.get('quest_time', 5400)
+                # Read game state directly and extract values in one go
+                game_state = self.memory.read_game_state()
+                current_map = game_state.get('current_map')
+                death_count = game_state.get('death_count', 0) or 0
+                quest_time = game_state.get('quest_time', 5400)
 
-                # Besoin de reload si :
-                # - Sur écran de fin (MAP=45)
-                # - Ou 3 morts
-                # - Ou temps écoulé
+                # Need reload if:
+                # - On reward screen (MAP=45)
+                # - Or 3 deaths
+                # - Or time expired
                 needs_reload = (
                         current_map == 45 or
                         death_count >= 3 or
@@ -831,42 +865,34 @@ class MonsterHunterEnv(gym.Env):
         # ===================================================================
         # REWARD
         # ===================================================================
-        # PROTECTION : Vérifier que prev_raw_memory est cohérent avec current_state
+        # PROTECTION : Reset prev_raw_memory on first step of episode
         if self.reward_calc and self.memory:
-            current_state = self.memory.read_game_state() # A GARDER
-
-            # Si on vient de reset (nouveau épisode), forcer prev_raw_memory à None
-            if self.episode_steps == 1:  # Premier step de l'épisode
+            # On first step of new episode, ensure prev_raw_memory is clean
+            if self.episode_steps == 1:
                 self.prev_raw_memory = None
-                logger.debug("Premier step d'épisode - prev_raw_memory nettoyé")
+                logger.debug("First episode step - prev_raw_memory cleaned to prevent stale data")
 
         reward, step_info = self._calculate_reward(action)
 
         # ===================================================================
-        # VÉRIFIER FIN DE QUÊTE (3 morts, temps écoulé, quest_failed)
+        # Check quest end (3 deaths or timeout)
         # ===================================================================
         death_count = step_info.get('death_count', 0) or 0
-        quest_failed = step_info.get('quest_failed', False)
         quest_time = step_info.get('quest_time', 5400)
 
-        # Conditions de fin de quête
+        # Episode termination conditions
         episode_should_end = False
         end_reason = None
 
         if death_count >= 3:
             episode_should_end = True
             end_reason = 'three_deaths'
-            logger.info(f"💀💀💀 3 MORTS DÉTECTÉES (count={death_count})")
-
-        elif quest_failed:
-            episode_should_end = True
-            end_reason = 'quest_failed_flag'
-            logger.info(f"QUÊTE ÉCHOUÉE (flag quest_failed)")
+            logger.info(f"💀💀💀 3 DEATHS DETECTED (count={death_count})")
 
         elif quest_time is not None and quest_time <= 1:
             episode_should_end = True
             end_reason = 'time_expired'
-            logger.info(f"⏱️ TEMPS ÉCOULÉ (≤1s)")
+            logger.info(f"⏱️ TIME EXPIRED (≤1s)")
 
         # ===================================================================
         # SI FIN DÉTECTÉE : Marquer et terminer

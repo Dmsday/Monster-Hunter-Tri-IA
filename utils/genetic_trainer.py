@@ -5,8 +5,9 @@ Implémente évolution génétique selon spec v1.0
 
 import numpy as np
 import copy
+from tqdm import tqdm
 import torch
-from typing import List, Dict, Tuple
+from typing import List, Tuple
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import VecEnv
 
@@ -17,13 +18,14 @@ logger = get_module_logger('genetic_trainer')
 
 class GeneticTrainer:
     """
-    Entraîneur génétique pour multi-agents PPO
+    Genetic trainer for multi-agent PPO
 
-    Processus :
-    1. Évaluation : Chaque agent joue N épisodes
-    2. Sélection : Conservation élites + choix parents
-    3. Reproduction : Mutations + Croisements
+    Process:
+        1. Evaluation: Each agent plays N episodes
+        2. Selection: Keep elites + choose parents
+        3. Reproduction: Mutations + Crossovers
     """
+
 
     def __init__(
             self,
@@ -35,11 +37,11 @@ class GeneticTrainer:
     ):
         """
         Args:
-            agents: Liste agents PPO
-            env: Environnement vectorisé
-            elite_ratio: Ratio d'élites conservées
-            mutation_rate: Taux de mutation
-            episodes_per_eval: Episodes par évaluation
+            agents: List of PPO agents
+            env: Vectorized environment
+            elite_ratio: Ratio of elites to keep
+            mutation_rate: Mutation rate
+            episodes_per_eval: Number of episodes per evaluation
         """
         self.agents = agents
         self.env = env
@@ -57,28 +59,67 @@ class GeneticTrainer:
 
     def evaluate_agent(self, agent: PPO, agent_id: int) -> float:
         """
-        Évalue un agent sur N épisodes
+        Evaluates agent over N episodes
 
         Returns:
-            Score moyen (fitness)
+            Average score (fitness) as Python float
         """
         episode_rewards = []
 
         for episode in range(self.episodes_per_eval):
-            obs = self.env.reset()
+            # Handle both tuple (obs, info) and legacy obs-only reset formats
+            reset_result = self.env.reset()
+            if isinstance(reset_result, tuple):
+                obs, _ = reset_result  # New Gymnasium format
+            else:
+                obs = reset_result  # Legacy format
+
             done = False
             episode_reward = 0.0
 
             while not done:
                 action, _ = agent.predict(obs, deterministic=False)
-                obs, reward, terminated, truncated, info = self.env.step(action)
-                episode_reward += reward[0]  # VecEnv retourne array
+
+                # Robust step handling with explicit error reporting
+                step_result = self.env.step(action)
+
+                try:
+                    if len(step_result) == 5:
+                        # Gymnasium format: obs, reward, terminated, truncated, info
+                        obs, reward, terminated, truncated, info = step_result
+                    elif len(step_result) == 4:
+                        # Legacy format: obs, reward, done, info
+                        obs, reward, done_legacy, info = step_result
+                        # Convert to Gymnasium format
+                        terminated = done_legacy
+                        truncated = np.array([False] * self.env.num_envs, dtype=bool)
+                    else:
+                        # Unexpected format = log error and raise
+                        logger.error(f"Unexpected step() return format: {len(step_result)} values")
+                        logger.error(f"Expected 4 (legacy) or 5 (Gymnasium) values")
+                        logger.error(f"step_result types: {[type(x).__name__ for x in step_result]}")
+                        raise ValueError(
+                            f"env.step() returned {len(step_result)} values, expected 4 or 5. "
+                            f"Check your VecEnv configuration."
+                        )
+                except ValueError as unpack_error:
+                    # Explicit unpacking error handling
+                    logger.error(f"Failed to unpack step() result: {unpack_error}")
+                    logger.error(f"step_result length: {len(step_result)}")
+                    logger.error(f"step_result content: {step_result}")
+                    raise RuntimeError(
+                        f"env.step() unpacking failed. "
+                        f"Got {len(step_result)} values, expected 4 or 5."
+                    ) from unpack_error
+
+                episode_reward += reward[0]  # VecEnv returns array
                 done = terminated[0] or truncated[0]
 
             episode_rewards.append(episode_reward)
 
-        fitness = np.mean(episode_rewards)
-        logger.info(f"Agent {agent_id} : Fitness = {fitness:.2f} (±{np.std(episode_rewards):.2f})")
+        # Convert numpy.floating to native Python float for type safety
+        fitness = float(np.mean(episode_rewards))
+        logger.info(f"Agent {agent_id}: Fitness = {fitness:.2f} (±{np.std(episode_rewards):.2f})")
 
         return fitness
 
@@ -114,7 +155,8 @@ class GeneticTrainer:
 
         return fitness_scores
 
-    def mutate_agent(self, agent: PPO, mutation_strength: float = 0.1) -> PPO:
+    @staticmethod
+    def mutate_agent(agent: PPO, mutation_strength: float = 0.1) -> PPO:
         """
         Mute un agent (perturbation des poids)
 
@@ -137,7 +179,8 @@ class GeneticTrainer:
 
         return mutated
 
-    def crossover_agents(self, parent1: PPO, parent2: PPO) -> PPO:
+    @staticmethod
+    def crossover_agents(parent1: PPO, parent2: PPO) -> PPO:
         """
         Croisement entre 2 agents (mélange poids)
 
@@ -215,29 +258,47 @@ class GeneticTrainer:
 
     def train(self, num_generations: int, progress_bar: bool = True):
         """
-        Boucle d'entraînement génétique
+        Genetic training loop
 
         Args:
-            num_generations: Nombre de générations
-            progress_bar: Afficher progression
+            num_generations: Number of generations to train
+            progress_bar: Display progress bar (if True, shows generation progress)
         """
         logger.info("")
         logger.info("=" * 70)
-        logger.info("DÉMARRAGE ENTRAÎNEMENT GÉNÉTIQUE")
+        logger.info("GENETIC TRAINING STARTED")
         logger.info("=" * 70)
-        logger.info(f"Générations : {num_generations}")
-        logger.info(f"Agents : {self.num_agents}")
-        logger.info(f"Episodes/eval : {self.episodes_per_eval}")
+        logger.info(f"Generations: {num_generations}")
+        logger.info(f"Agents: {self.num_agents}")
+        logger.info(f"Episodes/eval: {self.episodes_per_eval}")
+        logger.info(f"Progress bar: {'Enabled' if progress_bar else 'Disabled'}")  # Log parameter
         logger.info("")
 
         best_fitness_history = []
         mean_fitness_history = []
 
-        for generation in range(num_generations):
-            logger.info("")
-            logger.info("=" * 70)
-            logger.info(f"GÉNÉRATION {generation + 1}/{num_generations}")
-            logger.info("=" * 70)
+        # Use progress_bar parameter for conditional display
+        if progress_bar:
+            try:
+                generation_iterator = tqdm(
+                    range(num_generations),
+                    desc="Genetic Training",
+                    unit="gen"
+                )
+            except ImportError:
+                # tqdm not available - use plain range iterator
+                logger.warning("tqdm not available - falling back to simple logging")
+                generation_iterator = range(num_generations)
+        else:
+            generation_iterator = range(num_generations)
+
+        for generation in generation_iterator:
+            # Conditional logging based on progress_bar
+            if not progress_bar:
+                logger.info("")
+                logger.info("=" * 70)
+                logger.info(f"GENERATION {generation + 1}/{num_generations}")
+                logger.info("=" * 70)
 
             # 1. ÉVALUATION
             fitness_scores = self.evaluate_generation()

@@ -5,23 +5,32 @@ Gestionnaire HidHide pour isolation des manettes virtuelles
 import subprocess
 import os
 import logging
-import time
 from typing import Optional
+import vgamepad as vg
 
 logger = logging.getLogger('hidhide_manager')
 
 
 def is_admin() -> bool:
     """
-    Vérifie si le script tourne avec droits admin
+    Verify if script runs with admin rights
 
     Returns:
-        True si administrateur
+        True if administrator, False otherwise
     """
     try:
         import ctypes
+        import ctypes.wintypes
+
+        # Access Shell32.dll and check admin status
+        # IsUserAnAdmin is a Windows API function that returns BOOL (1 if admin, 0 otherwise)
+        # PyCharm can't infer this dynamically loaded function, but it exists on Windows
+        # noinspection PyUnresolvedReferences
         return ctypes.windll.shell32.IsUserAnAdmin() != 0
-    except:
+    except (AttributeError, OSError) as admin_check_error:
+        # AttributeError: windll.shell32 not available (non-Windows)
+        # OSError: DLL access failed
+        logger.debug(f"Admin check failed: {admin_check_error}")
         return False
 
 
@@ -76,9 +85,11 @@ class HidHideManager:
             )
             if result.stdout:
                 version_line = result.stdout.strip().split('\n')[0]
-                logger.info(f"Version : {version_line}")
-        except:
-            pass  # Version non critique
+                logger.info(f"Version: {version_line}")
+
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError) as hidhide_version_error:
+            # Version check is non-critical, continue without it
+            logger.debug(f"Could not retrieve HidHide version: {hidhide_version_error}")
 
     def _check_hidhide_installed(self) -> bool:
         """Vérifie si HidHide est installé"""
@@ -169,23 +180,25 @@ class HidHideManager:
                 'exe': allowed_exe
             })
 
-            logger.info(f"✅ Device configuré pour {os.path.basename(allowed_exe)}")
+            logger.info(f"Device configuré pour {os.path.basename(allowed_exe)}")
 
         except subprocess.CalledProcessError as configure_device_error:
-            logger.error(f"❌ Erreur configuration HidHide: {configure_device_error}")
+            logger.error(f"Erreur configuration HidHide: {configure_device_error}")
 
-            # Afficher stdout/stderr si disponibles
+            # Display stdout/stderr if available
             if configure_device_error.stdout:
                 try:
                     logger.error(f"   Stdout: {configure_device_error.stdout.decode('utf-8', errors='ignore')}")
-                except Exception:
-                    pass
+                except (AttributeError, UnicodeDecodeError) as decode_error:
+                    # AttributeError: stdout is not bytes
+                    # UnicodeDecodeError: invalid encoding
+                    logger.debug(f"Could not decode stdout: {decode_error}")
 
             if configure_device_error.stderr:
                 try:
                     logger.error(f"   Stderr: {configure_device_error.stderr.decode('utf-8', errors='ignore')}")
-                except Exception:
-                    pass
+                except (AttributeError, UnicodeDecodeError) as decode_error:
+                    logger.debug(f"Could not decode stderr: {decode_error}")
 
             raise
 
@@ -240,8 +253,8 @@ class HidHideManager:
 
                 if vigem_devices:
                     logger.debug("Devices ViGEm trouvés :")
-                    for i, dev in enumerate(vigem_devices):
-                        logger.debug(f"   [{i}] {dev[:80]}...")
+                    for j, dev in enumerate(vigem_devices):
+                        logger.debug(f"   [{j}] {dev[:80]}...")
 
                 if gamepad_index < len(vigem_devices):
                     selected = vigem_devices[gamepad_index]
@@ -253,47 +266,47 @@ class HidHideManager:
                     logger.warning(f"Demandé : #{gamepad_index}, Disponibles : {len(vigem_devices)}")
 
                     if len(vigem_devices) == 0:
-                        logger.error("❌ Aucun device ViGEm détecté!")
-                        logger.error("Causes possibles:")
-                        logger.error("   1. Manettes virtuelles pas encore créées")
-                        logger.error("   2. ViGEmBus non installé")
-                        logger.error("   3. Drivers ViGEm non chargés")
+                        logger.error("No ViGEm device detected!")
+                        logger.error("Possible causes:")
+                        logger.error("   1. Virtual controllers not created yet")
+                        logger.error("   2. ViGEmBus not installed")
+                        logger.error("   3. ViGEm drivers not loaded")
 
                     return None
 
             except subprocess.CalledProcessError as list_error:
-                logger.error(f"Erreur listage devices HidHide: {list_error}")
+                logger.error(f"HidHide device listing error: {list_error}")
                 if list_error.stderr:
                     logger.error(f"   Stderr: {list_error.stderr}")
 
-                # Si dernière tentative, abandonner
+                # If it's the last attempt, give up
                 if attempt == len(timeouts):
                     return None
 
-                # Sinon, réessayer
-                logger.warning(f"Tentative {attempt} échouée, retry dans 2s...")
+                # Otherwise, retry
+                logger.warning(f"Attempt {attempt} failed, retrying in 2s...")
                 time.sleep(2)
                 continue
 
             except subprocess.TimeoutExpired:
                 logger.warning(f"Timeout tentative {attempt} ({timeout}s dépassé)")
 
-                # Si dernière tentative, abandonner
+                # If it's the last attempt, give up
                 if attempt == len(timeouts):
-                    logger.error("Échec après 3 tentatives")
-                    logger.error("💡 Solutions:")
-                    logger.error("   1. HidHide CLI trop lent → Redémarre le PC")
-                    logger.error("   2. Trop de devices → Déconnecte USB inutiles")
-                    logger.error("   3. Cache corrompu → Réinstalle HidHide")
+                    logger.error("Failed after 3 attempts")
+                    logger.error("💡 Possible solutions:")
+                    logger.error("   1. HidHide CLI too slow → Restart your PC")
+                    logger.error("   2. Too many devices → Unplug unnecessary USB devices")
+                    logger.error("   3. Corrupted cache → Reinstall HidHide")
                     return None
 
-                # Sinon, réessayer avec timeout plus long
-                logger.warning(f"Retry avec timeout plus long ({timeouts[attempt]}s)...")
+                # Otherwise, retry with a longer timeout
+                logger.warning(f"Retrying with a longer timeout ({timeouts[attempt]}s)...")
                 time.sleep(1)
                 continue
 
             except Exception as get_device_error:
-                logger.error(f"Erreur inattendue: {get_device_error}")
+                logger.error(f"Unexpected error: {get_device_error}")
 
                 if attempt == len(timeouts):
                     import traceback
@@ -345,8 +358,6 @@ if __name__ == "__main__":
         gamepads = []
 
         try:
-            import vgamepad as vg
-
             num_gamepads = 2
             print(f"Création de {num_gamepads} manettes...")
 
@@ -429,15 +440,17 @@ if __name__ == "__main__":
 
         print("🧹 Nettoyage...")
 
-        # Nettoyer manettes
+        # Cleanup gamepads
         if gamepads:
             for i, gp in enumerate(gamepads):
                 try:
                     gp.reset()
                     gp.update()
-                except:
-                    pass
-            print(f"   ✅ {len(gamepads)} manette(s) nettoyée(s)")
+                except (AttributeError, RuntimeError) as gamepad_cleanup_error:
+                    # AttributeError: gamepad object invalid
+                    # RuntimeError: ViGEm bus disconnected
+                    print(f"   ⚠️  Gamepad #{i} cleanup failed: {gamepad_cleanup_error}")
+            print(f"   ✅ {len(gamepads)} gamepad(s) cleaned")
 
         # Réinitialiser HidHide
         manager.reset_all()

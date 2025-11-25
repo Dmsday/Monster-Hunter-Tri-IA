@@ -36,21 +36,25 @@ logger = get_module_logger('frame_capture')
 
 
 class FrameCapture:
-    def __init__(self, window_name="Dolphin", target_fps=30, instance_id=0, force_printwindow=False):
+    def __init__(self, window_name="Dolphin", target_fps=30, instance_id=0, force_printwindow=False,
+                 expected_window_title=None):
         """
         Args:
-            window_name: Nom de la fenêtre Dolphin
+            window_name: Nom de la fenêtre Dolphin (deprecated, use expected_window_title)
             target_fps: FPS cible pour la capture
             instance_id: ID de l'instance (pour renommage multi-instance)
             force_printwindow: Forcer PrintWindow pour rtvision
+            expected_window_title: Titre exact attendu (ex: "MHTri-0") - PRIORITY over instance_id
         """
         self.window_name = window_name
         self.instance_id = instance_id
+        self.expected_window_title = expected_window_title
         self.hwnd = None
         self.target_fps = target_fps
         self.force_printwindow = force_printwindow
         self.frame_delay = 1.0 / target_fps
         self.last_capture_time = 0
+        self._shutdown = False  # Flag to stop reconnection attempts during cleanup
 
         # Variables pour objets GDI persistants
         self._hwnd_dc = None
@@ -121,12 +125,13 @@ class FrameCapture:
 
     def find_window(self):
         """
-        PRIORITÉ MULTI-INSTANCE :
-        1. MHTri-1, MHTri-2, ..., MHTri-100 (numérotées)
-        2. Monster Hunter Tri (titre complet)
-        3. MHTri (sans numéro)
-        4. Dolphin avec jeu chargé
-        5. Dolphin générique
+        PRIORITY MULTI-INSTANCE:
+        0. EXACT MATCH if expected_window_title provided (NEW - HIGHEST PRIORITY)
+        1. MHTri-1, MHTri-2, ..., MHTri-100 (numbered)
+        2. Monster Hunter Tri (full title)
+        3. MHTri (without number)
+        4. Dolphin with game loaded
+        5. Generic Dolphin
 
         EXCLUSIONS :
             - PyCharm, Visual Studio, VSCode
@@ -139,9 +144,19 @@ class FrameCapture:
                 game_title = win32gui.GetWindowText(h)
                 title_lower = game_title.lower()
 
-                # Ignorer fenêtres vides
+                # Skip empty windows
                 if not game_title:
                     return True
+
+                # PRIORITY 0 : EXACT MATCH (if expected_window_title provided)
+                if self.expected_window_title:
+                    if game_title == self.expected_window_title:
+                        # Exact match found - HIGHEST PRIORITY
+                        wins.append((h, game_title, 100000))  # Priority >> 10000
+                        return True
+                    else:
+                        # Not our window, skip
+                        return True
 
                 # FILTRE EXCLUSION : Ignorer fenêtres IDEs et navigateurs
                 excluded_patterns = [
@@ -211,16 +226,16 @@ class FrameCapture:
                 f"   3. La fenêtre est-elle visible (pas minimisée)?\n"
             )
 
-        # Trier par priorité décroissante
+        # Sort by priority (descending)
         windows.sort(key=lambda x: x[2], reverse=True)
 
-        # Prendre la fenêtre avec la plus haute priorité
+        # Take highest priority window
         self.hwnd, found_title, priority = windows[0]
 
-        # Logging informatif selon la fenetre trouvee
-        if priority >= 10000:
-            logger.info(f"Fenêtre MHTri-{self.instance_id} trouvée !")
-            logger.info(f" Titre: '{found_title}'")
+        # Logging according to window found
+        if priority >= 100000:
+            logger.info(f"Exact window match found: '{found_title}'")
+            logger.info(f"  Expected: '{self.expected_window_title}'")
             logger.info(f"  HWND: {self.hwnd}")
             logger.info(f"  Priorité: {priority}")
         elif priority >= 1000:
@@ -285,25 +300,36 @@ class FrameCapture:
             crop_region: tuple[int, int, int, int] | None = None,
     ) -> np.ndarray:
         """
-        Capture une frame de la fenêtre Dolphin avec gestion d'erreur robuste
+        Capture a frame from the Dolphin window with robust error handling
 
         Args:
-            crop_region: Tuple (x, y, width, height) pour zone spécifique
+            crop_region: Tuple (x, y, width, height) for a specific area
 
         Returns:
-            numpy.ndarray: Image RGB (H, W, 3)
+            numpy.ndarray: RGB image (H, W, 3)
         """
-        # Vérifier que la fenêtre existe
+        # Check if shutting down --> stop trying to reconnect
+        if self._shutdown:
+            logger.debug("Frame capture shutdown, returning black frame")
+            return self._get_black_frame()
+
+        # Check if the window exists
         if self.hwnd is None:
+            if self._shutdown:  # Double-check before attempting reconnection
+                return self._get_black_frame()
             try:
                 self.find_window()
             except Exception as find_error:
-                logger.error(f"Impossible de trouver Dolphin: {find_error}")
+                logger.error(f"Unable to find Dolphin: {find_error}")
                 return self._get_black_frame()
 
-        # Vérifier que la fenêtre existe encore
+        # Check if the window still exists
         if not win32gui.IsWindow(self.hwnd):
-            logger.warning("Fenêtre Dolphin fermée - recherche d'une nouvelle fenêtre...")
+            if self._shutdown:  # Don't try to reconnect if shutting down
+                logger.debug("Window closed during shutdown, skipping reconnection")
+                return self._get_black_frame()
+
+            logger.warning("Dolphin window closed - searching for a new window...")
             try:
                 self.find_window()
             except (ValueError, RuntimeError, OSError):
@@ -540,6 +566,14 @@ class FrameCapture:
         Fermeture propre
         """
         self._cleanup_gdi()
+
+    def shutdown(self):
+        """
+        Signal frame capture to stop reconnection attempts.
+        Called during training cleanup to prevent spam during Dolphin shutdown.
+        """
+        self._shutdown = True
+        logger.info("Frame capture shutdown - stopping reconnection attempts")
 
     def capture_game_area(self):
         """

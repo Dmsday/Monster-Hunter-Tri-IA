@@ -435,7 +435,7 @@ function Show-LauncherDialog {
     
     # Label instances
     $lblCount = New-Object System.Windows.Forms.Label
-    $lblCount.Text = "Nombre d'instances (1-$($Profiles.Count)) :"
+    $lblCount.Text = "Nombre d'instances (1-20) :"
     $lblCount.Location = New-Object System.Drawing.Point(20, 20)
     $lblCount.Size = New-Object System.Drawing.Size(250, 20)
     $form.Controls.Add($lblCount)
@@ -443,7 +443,7 @@ function Show-LauncherDialog {
     # NumericUpDown instances
     $numCount = New-Object System.Windows.Forms.NumericUpDown
     $numCount.Minimum = 1
-    $numCount.Maximum = $Profiles.Count
+    $numCount.Maximum = 20 # Auto-creation enabled with reasonable limit
     $numCount.Value = [Math]::Min(3, $Profiles.Count)
     $numCount.Location = New-Object System.Drawing.Point(280, 18)
     $numCount.Size = New-Object System.Drawing.Size(120, 20)
@@ -550,35 +550,83 @@ function Initialize-UserProfiles {
     )
     
     Write-Host "Checking User profiles..." -ForegroundColor Cyan
+    Write-Host "  Base User folder: $BaseUserFolder" -ForegroundColor Gray
     
     $DolphinDir = Split-Path -Parent $BaseUserFolder
     
     # Verify base User folder exists
     if (-not (Test-Path $BaseUserFolder -PathType Container)) {
         Write-Error "Base User folder not found: $BaseUserFolder"
-        Write-Error "Launch Dolphin at least once to create it"
+        Write-Error "SOLUTION: Launch Dolphin at least once to create User folder"
         return $false
     }
     
-    # Create User1, User2, ... if missing
+    Write-Host "  Base User folder exists" -ForegroundColor Green
+    Write-Host "  Required instances: $NumInstances" -ForegroundColor Cyan
+    Write-Host ""
+    
+    # Track created/existing profiles
+    $CreatedCount = 0
+    $ExistingCount = 0
+    $FailedCount = 0
+    
+    # Create User1, User2, ... User(N-1) if missing
     for ($i = 1; $i -lt $NumInstances; $i++) {
         $TargetFolder = Join-Path $DolphinDir "User$i"
         
-        if (-not (Test-Path $TargetFolder -PathType Container)) {
-            Write-Host "  Creating User$($i)..." -ForegroundColor Yellow
-            
-            try {
-                Copy-Item -Path $BaseUserFolder -Destination $TargetFolder -Recurse -Force
-                Write-Host "  User$($i) created successfully" -ForegroundColor Green
-            }
-            catch {
-                Write-Error "  Failed to create User$($i): $($_)"
-                return $false
-            }
+        if (Test-Path $TargetFolder -PathType Container) {
+            Write-Host "  User$i : Already exists" -ForegroundColor Gray
+            $ExistingCount++
         }
         else {
-            Write-Host "  User$($i) already exists" -ForegroundColor Gray
+            Write-Host "  User$i : Creating from base User folder..." -ForegroundColor Yellow
+            
+            try {
+                # Copy entire User folder structure
+                Copy-Item -Path $BaseUserFolder -Destination $TargetFolder -Recurse -Force -ErrorAction Stop
+                
+                # Verify copy succeeded
+                if (Test-Path $TargetFolder -PathType Container) {
+                    Write-Host "  User$i : Created successfully" -ForegroundColor Green
+                    $CreatedCount++
+                    
+                    # Verify Config folder exists inside
+                    $ConfigFolder = Join-Path $TargetFolder "Config"
+                    if (Test-Path $ConfigFolder) {
+                        Write-Host "    Config folder verified" -ForegroundColor DarkGray
+                    }
+                    else {
+                        Write-Host "    WARNING: Config folder missing, creating..." -ForegroundColor Yellow
+                        New-Item -ItemType Directory -Path $ConfigFolder -Force | Out-Null
+                    }
+                }
+                else {
+                    Write-Error "  User$i : Copy appeared to succeed but folder not found"
+                    $FailedCount++
+                }
+            }
+            catch {
+                Write-Error "  User$i : Failed to create - $($_)"
+                Write-Error "    Source: $BaseUserFolder"
+                Write-Error "    Destination: $TargetFolder"
+                $FailedCount++
+            }
         }
+    }
+    
+    Write-Host ""
+    Write-Host "Profile creation summary:" -ForegroundColor Cyan
+    Write-Host "  Existing profiles : $ExistingCount" -ForegroundColor Gray
+    Write-Host "  Created profiles  : $CreatedCount" -ForegroundColor Green
+    Write-Host "  Failed profiles   : $FailedCount" -ForegroundColor $(if ($FailedCount -gt 0) { "Red" } else { "Gray" })
+    Write-Host "  Total required    : $($NumInstances - 1)" -ForegroundColor Cyan
+    Write-Host ""
+    
+    # Return success if no failures
+    if ($FailedCount -gt 0) {
+        Write-Error "Some User profiles could not be created"
+        Write-Error "SOLUTION: Manually copy User folder and rename to User1, User2, etc."
+        return $false
     }
     
     return $true
@@ -871,31 +919,60 @@ else {
     }
 }
 
-# Copier config si demande
-if ($options.CopyConfig) {
-    Write-Host "`nCopie de la configuration..." -ForegroundColor Cyan
-    Copy-ConfigToProfiles -Profiles $profiles
-}
+# ==============================================================================
+# AUTO-CREATE MISSING USER PROFILES
+# ==============================================================================
+$RequiredProfiles = $options.Count
+$AvailableProfiles = $profiles.Count
 
-# BEFORE launching instances, ensure all User profiles exist
-if ($profiles.Count -lt $options.Count) {
-    Write-Host "Not enough User profiles detected" -ForegroundColor Yellow
-    Write-Host "  Requested: $($options.Count) instances" -ForegroundColor Yellow
-    Write-Host "  Available: $($profiles.Count) profiles" -ForegroundColor Yellow
+if ($AvailableProfiles -lt $RequiredProfiles) {
     Write-Host ""
-    Write-Host "Auto-creating missing profiles..." -ForegroundColor Cyan
+    Write-Host "======================================================================" -ForegroundColor Yellow
+    Write-Host "INSUFFICIENT USER PROFILES" -ForegroundColor Yellow
+    Write-Host "======================================================================" -ForegroundColor Yellow
+    Write-Host "  Requested instances : $RequiredProfiles" -ForegroundColor White
+    Write-Host "  Available profiles  : $AvailableProfiles" -ForegroundColor White
+    Write-Host ""
+    Write-Host "Auto-creating missing User profiles..." -ForegroundColor Cyan
+    Write-Host "======================================================================" -ForegroundColor Yellow
+    Write-Host ""
     
-    $ProfilesReady = Initialize-UserProfiles -NumInstances $options.Count -BaseUserFolder $profiles[0].Path
+    # Use the first profile as base (should be "User")
+    $BaseUserFolder = $profiles[0].Path
     
-    if (-not $ProfilesReady) {
-        Write-Error "Profile creation failed"
-        Write-Error "Create User1, User2, ... folders manually in Dolphin directory"
+    $ProfilesCreated = Initialize-UserProfiles -NumInstances $RequiredProfiles -BaseUserFolder $BaseUserFolder
+    
+    if (-not $ProfilesCreated) {
+        Write-Host ""
+        Write-Host "CRITICAL ERROR: Failed to create User profiles" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "MANUAL SOLUTION:" -ForegroundColor Yellow
+        Write-Host "  1. Navigate to Dolphin directory:" -ForegroundColor Yellow
+        Write-Host "     $(Split-Path -Parent $Config.DolphinPath)" -ForegroundColor Gray
+        Write-Host "  2. Copy the 'User' folder" -ForegroundColor Yellow
+        Write-Host "  3. Rename copies to: User1, User2, User3..." -ForegroundColor Yellow
+        Write-Host "  4. Run this script again" -ForegroundColor Yellow
+        Write-Host ""
         exit 1
     }
     
     # Re-scan profiles after creation
+    Write-Host "Re-scanning User profiles..." -ForegroundColor Cyan
     $profiles = Get-UserProfiles
-    Write-Host "Profiles after creation: $($profiles.Count)" -ForegroundColor Green
+    Write-Host "Profiles after auto-creation: $($profiles.Count)" -ForegroundColor Green
+    Write-Host ""
+    
+    # Final verification
+    if ($profiles.Count -lt $RequiredProfiles) {
+        Write-Host "ERROR: Still missing profiles after auto-creation" -ForegroundColor Red
+        Write-Host "  Required : $RequiredProfiles" -ForegroundColor Yellow
+        Write-Host "  Available: $($profiles.Count)" -ForegroundColor Yellow
+        exit 1
+    }
+}
+else {
+    Write-Host ""
+    Write-Host "User profiles check: OK ($AvailableProfiles profiles available)" -ForegroundColor Green
 }
 
 # Copier config si demande
@@ -903,6 +980,104 @@ if ($options.CopyConfig) {
     Write-Host "`nCopie de la configuration..." -ForegroundColor Cyan
     Copy-ConfigToProfiles -Profiles $profiles
 }
+
+# ==============================================================================
+# ENABLE BACKGROUND INPUT FOR ALL INSTANCES
+# ==============================================================================
+Write-Host "`nConfiguring Background Input for multi-instance..." -ForegroundColor Cyan
+
+$DolphinDir = Split-Path -Parent $Config.DolphinPath
+
+for ($i = 0; $i -lt $options.Count; $i++) {
+    # Determine User folder path
+    $UserFolderName = if ($i -eq 0) { "User" } else { "User$i" }
+    $UserFolderPath = Join-Path $DolphinDir $UserFolderName
+    
+    # Skip if folder doesn't exist
+    if (-not (Test-Path $UserFolderPath -PathType Container)) {
+        Write-Host "  Instance $i : User folder not found, skipping" -ForegroundColor Yellow
+        continue
+    }
+    
+    # Path to Dolphin.ini
+    $ConfigFolder = Join-Path $UserFolderPath "Config"
+    $DolphinIniPath = Join-Path $ConfigFolder "Dolphin.ini"
+    
+    # Ensure Config folder exists
+    if (-not (Test-Path $ConfigFolder -PathType Container)) {
+        New-Item -ItemType Directory -Path $ConfigFolder -Force | Out-Null
+        Write-Host "  Instance $i : Created Config folder" -ForegroundColor Gray
+    }
+    
+    # Read existing INI content or create empty array
+    $IniContent = @()
+    if (Test-Path $DolphinIniPath) {
+        $IniContent = Get-Content $DolphinIniPath -Encoding UTF8
+    }
+    
+    # Check if [Input] section exists
+    $HasInputSection = $false
+    $ModifiedContent = @()
+    $InsideInputSection = $false
+    $BackgroundInputFound = $false
+    
+    foreach ($line in $IniContent) {
+        # Detect [Input] section
+        if ($line -match '^\[Input\]') {
+            $HasInputSection = $true
+            $InsideInputSection = $true
+            $ModifiedContent += $line
+            continue
+        }
+        
+        # Detect next section (end of [Input])
+        if ($line -match '^\[.*\]' -and $InsideInputSection) {
+            # Insert BackgroundInput before next section if not found
+            if (-not $BackgroundInputFound) {
+                $ModifiedContent += "BackgroundInput = True"
+            }
+            $InsideInputSection = $false
+        }
+        
+        # Skip existing BackgroundInput line (we'll add our own)
+        if ($line -match '^BackgroundInput\s*=') {
+            $BackgroundInputFound = $true
+            $ModifiedContent += "BackgroundInput = True"
+            continue
+        }
+        
+        $ModifiedContent += $line
+    }
+    
+    # If [Input] section exists but BackgroundInput not added yet
+    if ($HasInputSection -and $InsideInputSection -and -not $BackgroundInputFound) {
+        $ModifiedContent += "BackgroundInput = True"
+    }
+    
+    # If no [Input] section exists, add it at the end
+    if (-not $HasInputSection) {
+        $ModifiedContent += ""
+        $ModifiedContent += "[Input]"
+        $ModifiedContent += "BackgroundInput = True"
+        Write-Host "  Instance $i : Created [Input] section" -ForegroundColor Green
+    }
+    else {
+        Write-Host "  Instance $i : Updated [Input] section" -ForegroundColor Green
+    }
+    
+    # Write back to file with UTF8 encoding (no BOM)
+    try {
+        $Utf8NoBom = New-Object System.Text.UTF8Encoding $false
+        [System.IO.File]::WriteAllLines($DolphinIniPath, $ModifiedContent, $Utf8NoBom)
+        Write-Host "  Instance $i : Background Input enabled" -ForegroundColor Green
+    }
+    catch {
+        Write-Host "  Instance $i : ERROR writing Dolphin.ini: $_" -ForegroundColor Red
+    }
+}
+
+Write-Host "Background Input configuration complete" -ForegroundColor Green
+Write-Host ""
 
 # Launch instances quickly
 Write-Host "`nQuick launch of instances..." -ForegroundColor Cyan

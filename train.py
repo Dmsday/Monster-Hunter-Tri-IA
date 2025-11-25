@@ -15,6 +15,9 @@ import threading               # Threads (non-blocking input() with GUI)
 import logging                 # Logging (for reconnecting handlers)
 import subprocess              # Launching Dolphin process via PowerShell
 from datetime import datetime  # Timestamps for experiment names
+import atexit                  # Emergency cleanup on script exit
+import signal                  # Signal handling for Ctrl+C and crashes
+import json                    # Config persistence
 
 # ============================================================================
 # VISUALIZATION (for CNN testing/exploration)
@@ -91,25 +94,25 @@ except ImportError as hidhide_import_error:
 # ============================================================================
 # DEPENDENCY CHECK
 # ============================================================================
-logger.info("🔍 Checking dependencies...")
+logger.debug("🔍 Checking dependencies...")
 
 try:
     from vision.preprocessing import FramePreprocessor
-    logger.info("  FramePreprocessor")
+    logger.debug("  FramePreprocessor")
 except Exception as import_preprocessing_error:
     logger.error(f"FramePreprocessor: {import_preprocessing_error}")
 
 try:
     from utils.training_gui import TrainingGUI
-    logger.info("  TrainingGUI")
+    logger.debug("  TrainingGUI")
 except Exception as import_training_gui_error:
     logger.error(f"TrainingGUI: {import_training_gui_error}")
 
 # ============================================================================
 # ACTIONS INFORMATION
 # ============================================================================
-logger.info(f"🎮 Action configuration:")
-logger.info(f"Total: 19 possible actions (0-18)")
+logger.debug(f"🎮 Action configuration:")
+logger.debug(f"Total: 19 possible actions (0-18)")
 
 
 # ============================================================================
@@ -134,21 +137,118 @@ def launch_dolphin_instances_via_powershell(
     Returns:
         True if successful, False otherwise
     """
-    # Path to the PowerShell script
+    # Define script_dir early (for cwd parameter)
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    ps_script = os.path.join(script_dir, "launch_dolphin_instances.ps1")
 
-    if not os.path.exists(ps_script):
-        logger.error(f"PowerShell script not found: {ps_script}")
+    # Normalize and validate dolphin_path
+    dolphin_path = os.path.abspath(dolphin_path)
+
+    # Handle both folder and .exe paths
+    if os.path.isdir(dolphin_path):
+        # User provided folder path, append Dolphin.exe
+        dolphin_exe = os.path.join(dolphin_path, "Dolphin.exe")
+        logger.debug(f"Folder path provided, looking for: {dolphin_exe}")
+
+        if os.path.isfile(dolphin_exe):
+            dolphin_path = dolphin_exe
+        else:
+            logger.error("=" * 70)
+            logger.error("DOLPHIN.EXE NOT FOUND IN FOLDER")
+            logger.error("=" * 70)
+            logger.error(f"Folder provided: {dolphin_path}")
+            logger.error(f"Expected file: {dolphin_exe}")
+            logger.error(f"File exists: {os.path.exists(dolphin_exe)}")
+            logger.error("")
+            logger.error("SOLUTION:")
+            logger.error("  Verify the folder contains Dolphin.exe")
+            logger.error("=" * 70)
+            return False
+
+    # Validate the .exe file
+    if not os.path.isfile(dolphin_path):
+        logger.error("=" * 70)
+        logger.error("DOLPHIN.EXE NOT FOUND")
+        logger.error("=" * 70)
+        logger.error(f"Provided path: {dolphin_path}")
+        logger.error(f"Path exists: {os.path.exists(dolphin_path)}")
+        logger.error(f"Is directory: {os.path.isdir(dolphin_path)}")
+        logger.error("")
+        logger.error("SOLUTION:")
+        logger.error("Use --dolphin-path with EITHER:")
+        logger.error("  1. Full path to Dolphin.exe:")
+        logger.error(f"     --dolphin-path 'C:\\Path\\To\\Dolphin.exe'")
+        logger.error("  2. Or folder containing Dolphin.exe:")
+        logger.error(f"     --dolphin-path 'C:\\Path\\To\\Dolphin-Folder'")
+        logger.error("=" * 70)
+        return False
+
+    logger.debug(f"Dolphin.exe validated: {dolphin_path}")
+
+    # calculate dolphin_dir from validated path
+    dolphin_dir = os.path.dirname(dolphin_path)
+
+    # Search for PowerShell script in proper order
+    # Priority 1: Same folder as Dolphin.exe
+    ps_script = os.path.join(dolphin_dir, "launch_dolphin_instances.ps1")
+    search_locations = [
+        ("Dolphin folder", ps_script),
+        ("train.py folder", os.path.join(script_dir, "launch_dolphin_instances.ps1")),
+        ("Current directory", os.path.abspath("launch_dolphin_instances.ps1"))
+    ]
+
+    found = False
+    for location_name, location_path in search_locations:
+        if os.path.isfile(location_path):
+            ps_script = location_path
+            logger.debug(f"PowerShell script found in {location_name}: {ps_script}")
+            found = True
+            break
+
+    if not found:
+        logger.error("=" * 70)
+        logger.error("POWERSHELL SCRIPT NOT FOUND")
+        logger.error("=" * 70)
+        logger.error("Searched in:")
+        for i, (name, path) in enumerate(search_locations, 1):
+            logger.error(f"  {i}. {name}: {path}")
+            logger.error(f"     Exists: {os.path.exists(path)}")
+        logger.error("")
+        logger.error("SOLUTIONS:")
+        logger.error("1. Copy launch_dolphin_instances.ps1 to Dolphin folder:")
+        logger.error(f"   Target: {dolphin_dir}")
+        logger.error("2. Or copy it to train.py folder:")
+        logger.error(f"   Target: {script_dir}")
+        logger.error("=" * 70)
+        return False
+
+    # Normalize paths to avoid issues
+    ps_script = os.path.normpath(ps_script)
+    dolphin_path = os.path.normpath(dolphin_path)
+    script_dir = os.path.normpath(script_dir)
+
+    # Validate script exists (final check)
+    if not os.path.isfile(ps_script):
+        logger.error("=" * 70)
+        logger.error("CRITICAL: PowerShell script not accessible")
+        logger.error("=" * 70)
+        logger.error(f"Path: {ps_script}")
+        logger.error(f"Exists: {os.path.exists(ps_script)}")
+        logger.error(f"Is file: {os.path.isfile(ps_script)}")
+        logger.error("")
+        logger.error("SOLUTION:")
+        logger.error("  Verify file permissions and antivirus settings")
+        logger.error("=" * 70)
         return False
 
     # PowerShell arguments
     ps_args = [
         "powershell.exe",
         "-ExecutionPolicy", "Bypass",
+        "-NoProfile",
         "-File", ps_script,
         "-NumInstances", str(num_instances),
-        "-NoGUI"  # Automatic mode
+        "-NoGUI",
+        "-DolphinExePath", dolphin_path
     ]
 
     if minimize_dolphin:
@@ -157,53 +257,120 @@ def launch_dolphin_instances_via_powershell(
     if minimize_game:
         ps_args.append("-MinimizeGame")
 
-    logger.info("=" * 70)
-    logger.info("🐚 LAUNCHING DOLPHIN INSTANCES VIA POWERSHELL")
-    logger.info("=" * 70)
-    logger.info(f"Script     : {ps_script}")
-    logger.info(f"Instances  : {num_instances}")
-    logger.info(f"Dolphin    : {dolphin_path}")
-    logger.info("")
+    # Compute timeout
+    dynamic_timeout = 10 + (num_instances * 10)
+
+    logger.debug("=" * 70)
+    logger.debug("LAUNCHING DOLPHIN INSTANCES VIA POWERSHELL")
+    logger.debug("=" * 70)
+    logger.debug(f"PowerShell script: {ps_script}")
+    logger.debug(f"Instances number: {num_instances}")
+    logger.debug(f"Dolphin.exe: {dolphin_path}")
+    logger.debug(f"Dolphin folder: {dolphin_dir}")
+    logger.debug(f"Timeout: {dynamic_timeout}s")
+    logger.debug(f"Working directory: {script_dir}")
+    logger.debug("")
+
+    # Show actual command
+    logger.debug("Full command:")
+    logger.debug(f"  {' '.join(ps_args)}")
+    logger.debug("")
 
     try:
+        logger.debug("Starting PowerShell...")
+        logger.debug("Waiting for script completion...")
+        logger.debug("")
+
         # Launch PowerShell
-        logger.info("🚀 Running PowerShell...")
         result = subprocess.run(
             ps_args,
             capture_output=True,
             text=True,
             check=True,
-            timeout=20,  # 20s timeout
-            cwd=script_dir  # Run inside script directory
+            timeout=dynamic_timeout,
+            cwd=script_dir,
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
 
-        logger.info("PowerShell completed successfully")
+        logger.debug("PowerShell completed successfully")
 
         # Display stdout (PowerShell logs)
         if result.stdout:
-            logger.info("")
-            logger.info("📋 PowerShell output:")
-            logger.info("-" * 70)
+            logger.debug("")
+            logger.debug("PowerShell output:")
+            logger.debug("-" * 70)
             for line in result.stdout.split('\n'):
                 if line.strip():
-                    logger.info(f"   {line}")
-            logger.info("-" * 70)
+                    logger.debug(f"{line}")
+            logger.debug("-" * 70)
+
+        # Active waiting for PID files with retry
+        logger.debug("")
+        logger.debug("Waiting for PID files to be created...")
+
+        max_wait = 10  # Max 10 seconds
+        check_interval = 0.5  # Check every 500ms
+        elapsed = 0
+
+        expected_pid_files = [
+            os.path.join(script_dir, f"dolphin_pid_{i}.tmp")
+            for i in range(num_instances)
+        ]
+
+        while elapsed < max_wait:
+            # Check if all PID files exist
+            existing_files = [f for f in expected_pid_files if os.path.exists(f)]
+
+            if len(existing_files) == num_instances:
+                logger.debug(f"All {num_instances} PID files found after {elapsed:.1f}s")
+                break
+
+            # Wait a bit
+            time.sleep(check_interval)
+            elapsed += check_interval
+
+            # Log progress every 2 seconds
+            if int(elapsed) % 2 == 0 and elapsed > 0:
+                logger.debug(f"  Found {len(existing_files)}/{num_instances} PID files ({elapsed:.0f}s elapsed)...")
+
+        # Final check
+        existing_files = [f for f in expected_pid_files if os.path.exists(f)]
+        if len(existing_files) < num_instances:
+            logger.warning(f"Only {len(existing_files)}/{num_instances} PID files found after {max_wait}s")
+            logger.warning("Some instances may not have started correctly")
+
+        # Extra 1s buffer to ensure files are fully written
+        time.sleep(1.0)
 
         return True
 
     except subprocess.TimeoutExpired:
-        logger.error("PowerShell timeout (20s exceeded)")
-        logger.error("💡 Dolphin instances are taking too long to load")
+        logger.error(f"PowerShell timeout ({dynamic_timeout}s exceeded)")
+        logger.error("Dolphin instances are taking too long to load")
+        logger.error("SOLUTIONS:")
+        logger.error("  1. Increase --dolphin-timeout")
+        logger.error("  2. Launch fewer instances")
+        logger.error("  3. Close other applications")
         return False
 
     except subprocess.CalledProcessError as ps_error:
         logger.error(f"PowerShell error (code {ps_error.returncode})")
         if ps_error.stdout:
             logger.error("Stdout:")
-            logger.error(ps_error.stdout)
+            for line in ps_error.stdout.split('\n'):
+                if line.strip():
+                    logger.error(f"  {line}")
         if ps_error.stderr:
             logger.error("Stderr:")
-            logger.error(ps_error.stderr)
+            for line in ps_error.stderr.split('\n'):
+                if line.strip():
+                    logger.error(f"  {line}")
+        logger.error("")
+        logger.error("COMMON CAUSES:")
+        logger.error("  1. PowerShell execution policy blocked")
+        logger.error("  2. Dolphin.exe path incorrect")
+        logger.error("  3. ROM file not found")
+        logger.error("  4. User folder path incorrect")
         return False
 
     except Exception as ps_error:
@@ -211,6 +378,170 @@ def launch_dolphin_instances_via_powershell(
         traceback.print_exc()
         return False
 
+
+def auto_detect_or_prompt_dolphin_path() -> str:
+    """
+    Auto-detect Dolphin path or prompt user
+
+    Search priority:
+    1. Common installation paths
+    2. Current directory
+    3. Ask user via console input
+
+    Returns:
+        Valid path to Dolphin.exe or folder containing it
+
+    Raises:
+        SystemExit: If user cancels input (Ctrl+C)
+
+    Note:
+        This function ALWAYS returns a valid path or exits.
+        It never returns None.
+    """
+    logger.info("Auto-detecting Dolphin path...")
+
+    # Common paths to check
+    common_paths = [
+        # Portable installations
+        "./Dolphin-x64",
+        "./Dolphin",
+        "../Dolphin-x64",
+        "../Dolphin",
+
+        # User Documents
+        os.path.join(os.path.expanduser("~"), "Documents", "Dolphin-x64"),
+        os.path.join(os.path.expanduser("~"), "Documents", "Dolphin"),
+
+        # Program Files
+        "C:/Program Files/Dolphin-x64",
+        "C:/Program Files (x86)/Dolphin-x64",
+
+        # Desktop
+        os.path.join(os.path.expanduser("~"), "Desktop", "Dolphin-x64"),
+        os.path.join(os.path.expanduser("~"), "Desktop", "Dolphin"),
+    ]
+
+    # Check each path
+    for path in common_paths:
+        if os.path.exists(path):
+            # Check if it's a folder
+            if os.path.isdir(path):
+                dolphin_exe = os.path.join(path, "Dolphin.exe")
+                if os.path.isfile(dolphin_exe):
+                    logger.info(f"Found Dolphin at: {path}")
+                    return path
+            # Check if it's Dolphin.exe directly
+            elif os.path.isfile(path) and path.endswith("Dolphin.exe"):
+                logger.info(f"Found Dolphin.exe at: {path}")
+                return os.path.dirname(path)
+
+    # Not found - ask user
+    logger.warning("Dolphin path not found automatically")
+    logger.warning("")
+    logger.warning("Please provide the path to Dolphin:")
+    logger.warning("  - Either the folder containing Dolphin.exe")
+    logger.warning("  - Or the full path to Dolphin.exe")
+    logger.warning("")
+
+    while True:
+        try:
+            user_path = input("Dolphin path: ").strip().strip('"').strip("'")
+
+            if not user_path:
+                logger.error("Empty path provided")
+                continue
+
+            # Normalize path
+            user_path = os.path.abspath(user_path)
+
+            # Check if valid
+            if os.path.isdir(user_path):
+                dolphin_exe = os.path.join(user_path, "Dolphin.exe")
+                if os.path.isfile(dolphin_exe):
+                    logger.info(f"Valid Dolphin folder: {user_path}")
+                    return user_path
+                else:
+                    logger.error(f"Folder does not contain Dolphin.exe: {user_path}")
+            elif os.path.isfile(user_path) and user_path.endswith("Dolphin.exe"):
+                logger.info(f"Valid Dolphin.exe: {user_path}")
+                return os.path.dirname(user_path)
+            else:
+                logger.error(f"Invalid path: {user_path}")
+
+        except KeyboardInterrupt:
+            logger.error("\nCancelled by user")
+            sys.exit(1)
+        except Exception as prompt_error:
+            logger.error(f"Error: {prompt_error}")
+            continue
+
+    # Unreachable line but satisfies PyCharm
+    # This line will NEVER be executed because while True + sys.exit guarantees a return
+    # But it removes the PyCharm warning "Missing return statement"
+    raise RuntimeError("Unreachable code ; function always returns or exits")
+
+def cleanup_dolphin_processes(dolphin_pids: list):
+    """
+    Emergency cleanup: forcefully close all Dolphin instances
+    Called automatically on script exit (normal or crash)
+
+    Args:
+        dolphin_pids: List of Dolphin process IDs to terminate
+    """
+    if not dolphin_pids:
+        logger.debug("No Dolphin PIDs to cleanup")
+        return
+
+    logger.warning("=" * 70)
+    logger.warning("EMERGENCY CLEANUP: Closing all Dolphin instances")
+    logger.warning("=" * 70)
+
+    import psutil
+
+    closed_count = 0
+    failed_count = 0
+
+    for pid in dolphin_pids:
+        if pid is None or pid < 0:
+            continue
+
+        try:
+            # Check if process exists
+            if psutil.pid_exists(pid):
+                process = psutil.Process(pid)
+                process_name = process.name()
+
+                logger.info(f"Terminating PID {pid} ({process_name})...")
+
+                # Try graceful termination first
+                process.terminate()
+
+                # Wait up to 3 seconds for graceful shutdown
+                try:
+                    process.wait(timeout=3)
+                    logger.info(f"  PID {pid} terminated gracefully")
+                    closed_count += 1
+                except psutil.TimeoutExpired:
+                    # Force kill if still running
+                    logger.warning(f"  PID {pid} did not respond, forcing kill...")
+                    process.kill()
+                    process.wait(timeout=2)
+                    logger.info(f"  PID {pid} force killed")
+                    closed_count += 1
+            else:
+                logger.debug(f"PID {pid} already closed")
+
+        except psutil.NoSuchProcess:
+            logger.debug(f"PID {pid} no longer exists")
+        except psutil.AccessDenied:
+            logger.error(f"Access denied to PID {pid} (requires admin rights)")
+            failed_count += 1
+        except Exception as cleanup_error:
+            logger.error(f"Failed to close PID {pid}: {cleanup_error}")
+            failed_count += 1
+
+    logger.warning(f"Cleanup completed: {closed_count} closed, {failed_count} failed")
+    logger.warning("=" * 70)
 
 def wait_for_dolphin_windows(
         num_instances: int,
@@ -230,14 +561,14 @@ def wait_for_dolphin_windows(
     """
     import win32gui
 
-    logger.info("")
-    logger.info("=" * 70)
-    logger.info("DETECTING DOLPHIN WINDOWS")
-    logger.info("=" * 70)
-    logger.info(f"Expected instances : {num_instances}")
-    logger.info(f"Timeout            : {timeout}s")
-    logger.info(f"Check interval     : {check_interval}s")
-    logger.info("")
+    logger.debug("")
+    logger.debug("=" * 70)
+    logger.debug("DETECTING DOLPHIN WINDOWS")
+    logger.debug("=" * 70)
+    logger.debug(f"Expected instances : {num_instances}")
+    logger.debug(f"Timeout            : {timeout}s")
+    logger.debug(f"Check interval     : {check_interval}s")
+    logger.debug("")
 
     start_time = time.time()
     attempt = 0
@@ -247,7 +578,7 @@ def wait_for_dolphin_windows(
         attempt += 1
         elapsed = int(time.time() - start_time)
 
-        logger.info(f"Attempt {attempt} ({elapsed}s elapsed)...")
+        logger.debug(f"Attempt {attempt} ({elapsed}s elapsed)...")
 
         # Detect MHTri windows
         def callback(hwnd, wins):
@@ -269,38 +600,37 @@ def wait_for_dolphin_windows(
         # Sort by title
         windows.sort(key=lambda x: x['title'])
 
-        logger.info(f"Detected windows : {len(windows)}/{num_instances}")
+        logger.debug(f"Detected windows : {len(windows)}/{num_instances}")
 
         if windows:
             for i, win in enumerate(windows):
-                logger.info(f"      [{i}] {win['title']}")
+                logger.debug(f"      [{i}] {win['title']}")
 
         # Check if we have all windows
         if len(windows) >= num_instances:
-            logger.info("")
-            logger.info("ALL WINDOWS DETECTED!")
-            logger.info("=" * 70)
-            logger.info("")
+            logger.debug("")
+            logger.debug("ALL WINDOWS DETECTED!")
+            logger.debug("=" * 70)
+            logger.debug("")
             return True
 
         # Wait before next check
         if time.time() - start_time < timeout:
-            logger.info(f"Waiting {check_interval}s before next check...")
-            logger.info("")
+            logger.debug(f"Waiting {check_interval}s before next check...")
+            logger.debug("")
             time.sleep(check_interval)
+        else:
+            # Timeout exceeded - show what we found
+            logger.error("")
+            logger.error("TIMEOUT: Not all windows were detected")
+            logger.error(f"   Expected : {num_instances}")
+            logger.error(f"   Found    : {len(windows)}")
 
-    # Timeout exceeded
-    logger.error("")
-    logger.error("TIMEOUT: Not all windows were detected")
-    logger.error(f"   Expected : {num_instances}")
-    logger.error(f"   Found    : {len(windows)}")
-    logger.error("")
-    logger.error("💡 Solutions:")
-    logger.error("   1. Check if Dolphin launches correctly")
-    logger.error("   2. Increase timeout (--dolphin-timeout)")
-    logger.error("   3. Check Dolphin.exe and ROM paths")
-    logger.error("=" * 70)
-    logger.error("")
+            # DEBUG : Show which windows we detected
+            if windows:
+                logger.error("Detected windows:")
+                for i, win in enumerate(windows):
+                    logger.error(f"[{i}] {win['title']}")
 
     return False
 
@@ -324,27 +654,27 @@ def calculate_agent_allocation(
     Returns:
         Dict avec la répartition calculée
     """
-    logger.info("")
-    logger.info("=" * 70)
-    logger.info("📊 CALCUL DE LA RÉPARTITION AGENTS/INSTANCES")
-    logger.info("=" * 70)
-    logger.info(f"Agents    : {num_agents}")
-    logger.info(f"Instances : {num_instances}")
-    logger.info(f"Mode      : {allocation_mode}")
-    logger.info("")
+    logger.debug("")
+    logger.debug("=" * 70)
+    logger.debug("📊 CALCUL DE LA RÉPARTITION AGENTS/INSTANCES")
+    logger.debug("=" * 70)
+    logger.debug(f"Agents    : {num_agents}")
+    logger.debug(f"Instances : {num_instances}")
+    logger.debug(f"Mode      : {allocation_mode}")
+    logger.debug("")
 
     # Détecter scénario
     if num_agents == num_instances:
         scenario = "ONE_TO_ONE"
-        logger.info("🎯 SCÉNARIO 1 : One-to-One (1 agent = 1 instance)")
+        logger.debug("🎯 SCÉNARIO 1 : One-to-One (1 agent = 1 instance)")
 
         # Allocation fixe
         allocation = {i: [i] for i in range(num_agents)}
 
     elif num_agents < num_instances:
         scenario = "AGENT_MULTIPLE_INSTANCES"
-        logger.info("🎯 SCÉNARIO 2 : Agent avec Instances Multiples")
-        logger.info(f"   → Chaque agent contrôle plusieurs instances")
+        logger.debug("🎯 SCÉNARIO 2 : Agent avec Instances Multiples")
+        logger.debug(f"   → Chaque agent contrôle plusieurs instances")
 
         if allocation_mode == 'manual' and allocation_map:
             # Parse allocation_map
@@ -364,9 +694,9 @@ def calculate_agent_allocation(
 
     else:  # num_agents > num_instances
         scenario = "INSTANCE_SHARING"
-        logger.info("🎯 SCÉNARIO 3 : Partage d'Instances")
-        logger.info(f"   → Plusieurs agents partagent les instances")
-        logger.info(f"   → Mode de gestion : {multi_agent_mode}")
+        logger.debug("🎯 SCÉNARIO 3 : Partage d'Instances")
+        logger.debug(f"   → Plusieurs agents partagent les instances")
+        logger.debug(f"   → Mode de gestion : {multi_agent_mode}")
 
         if allocation_mode == 'manual' and allocation_map:
             allocation = parse_allocation_map(allocation_map, num_agents, num_instances)
@@ -404,35 +734,35 @@ def calculate_agent_allocation(
             raise ValueError("Allocation SCÉNARIO 3 invalide : aucun partage")
 
     # Afficher répartition
-    logger.info("")
-    logger.info("📋 RÉPARTITION CALCULÉE :")
-    logger.info("-" * 70)
+    logger.debug("")
+    logger.debug("📋 RÉPARTITION CALCULÉE :")
+    logger.debug("-" * 70)
 
     for agent_id, instances in sorted(allocation.items()):
         instances_str = ", ".join(map(str, instances))
-        logger.info(f"   Agent {agent_id:2d} → Instances [{instances_str}]")
+        logger.debug(f"   Agent {agent_id:2d} → Instances [{instances_str}]")
 
-    logger.info("-" * 70)
-    logger.info("")
+    logger.debug("-" * 70)
+    logger.debug("")
 
     # Statistiques
     total_connections = sum(len(instances) for instances in allocation.values())
-    logger.info("📊 STATISTIQUES :")
-    logger.info(f"   Connexions totales : {total_connections}")
-    logger.info(f"   Moyenne par agent  : {total_connections / num_agents:.1f}")
+    logger.debug("📊 STATISTIQUES :")
+    logger.debug(f"   Connexions totales : {total_connections}")
+    logger.debug(f"   Moyenne par agent  : {total_connections / num_agents:.1f}")
 
     if scenario == "AGENT_MULTIPLE_INSTANCES":
-        logger.info(f"   Instances par agent : {[len(v) for v in allocation.values()]}")
+        logger.debug(f"   Instances par agent : {[len(v) for v in allocation.values()]}")
     elif scenario == "INSTANCE_SHARING":
         # Compter agents par instance
         agents_per_inst = {}
         for agent_id, instances in allocation.items():
             for inst in instances:
                 agents_per_inst[inst] = agents_per_inst.get(inst, 0) + 1
-        logger.info(f"   Agents par instance : {list(agents_per_inst.values())}")
+        logger.debug(f"   Agents par instance : {list(agents_per_inst.values())}")
 
-    logger.info("=" * 70)
-    logger.info("")
+    logger.debug("=" * 70)
+    logger.debug("")
 
     return {
         'scenario': scenario,
@@ -650,9 +980,9 @@ class ConsoleMessageManager:
         else:
             # Nouvelle ligne
             if count > 1:
-                logger.info(f"{message} x{count}")
+                logger.debug(f"{message} x{count}")
             else:
-                logger.info(f"{message}")
+                logger.debug(f"{message}")
 
         self.last_messages[key] = message
 
@@ -998,14 +1328,14 @@ def load_model_if_resume(args, env, device, load_model_logger: TrainingLogger = 
             logger.error(f"{error_msg}")
             sys.exit(1)
 
-        logger.info(f"📦 Chargement du modèle : {args.resume}")
+        logger.debug(f"📦 Chargement du modèle : {args.resume}")
         time.sleep(2.0)
 
         try:
             #Charger le modèle
             agent = PPO.load(args.resume, env=env, device=device)
-            logger.info(f"Modèle chargé avec succès")
-            logger.info(f"Timesteps précédents : {agent.num_timesteps:,}")
+            logger.debug(f"Modèle chargé avec succès")
+            logger.debug(f"Timesteps précédents : {agent.num_timesteps:,}")
 
             # Note : VecNormalize est géré séparément dans la création d'environnement
 
@@ -1133,7 +1463,7 @@ def main():
                              help='Nombre d\'instances Dolphin (défaut: 1)')
 
     multi_group.add_argument('--dolphin-path', type=str,
-                             default='C:/Dolphin/Dolphin.exe',
+                             default=None,
                              metavar='PATH',
                              help='Chemin vers Dolphin.exe')
 
@@ -1170,6 +1500,10 @@ def main():
     multi_group.add_argument('--weighted-eval-freq', type=int, default=100,
                              metavar='N',
                              help='Fréquence réévaluation (mode weighted)')
+
+    multi_group.add_argument('--dolphin-timeout', type=int, default=60,
+                             metavar='SECONDS',
+                             help='Timeout for Dolphin window detection (default: 60s)')
 
     # ============================================================================
     # GROUPE 5 : INTERFACE
@@ -1214,7 +1548,7 @@ def main():
         # Verifier que c'est un nom valide (pas "models" ou chemin bizarre)
         if exp_name_from_resume and exp_name_from_resume != 'models':
             args.name = exp_name_from_resume
-            logger.info(f"Nom d'expérience détecté depuis --resume : {args.name}")
+            logger.debug(f"Nom d'expérience détecté depuis --resume : {args.name}")
         else:
             # Fallback : generer nouveau nom
             logger.warning(f"Impossible de détecter le nom depuis --resume")
@@ -1261,7 +1595,7 @@ def main():
 
         # Détecter scénario
         if detected_scenario == "ONE_TO_ONE":
-            logger.info("📊 SCÉNARIO 1 : One-to-One (1 agent = 1 instance)")
+            logger.debug("📊 SCÉNARIO 1 : One-to-One (1 agent = 1 instance)")
 
             # Ignorer certains arguments
             if multi_agent_args.allocation_mode != 'auto':
@@ -1270,8 +1604,8 @@ def main():
                 logger.warning(f"multi_agent_mode ignoré en mode One-to-One")
 
         elif detected_scenario == "AGENT_MULTIPLE_INSTANCES":
-            logger.info("📊 SCÉNARIO 2 : Agent avec Instances Multiples")
-            logger.info(f"   {multi_agent_args.num_agents} agents, {multi_agent_args.num_instances} instances")
+            logger.debug("📊 SCÉNARIO 2 : Agent avec Instances Multiples")
+            logger.debug(f"   {multi_agent_args.num_agents} agents, {multi_agent_args.num_instances} instances")
 
             # multi_agent_mode non utilisé
             if multi_agent_args.multi_agent_mode != 'independent':
@@ -1279,9 +1613,9 @@ def main():
 
         # detected_scenario == "INSTANCE_SHARING"
         else:  # multi_agent_args.num_agents > multi_agent_args.num_instances
-            logger.info("📊 SCÉNARIO 3 : Partage d'Instances")
-            logger.info(f"   {multi_agent_args.num_agents} agents, {multi_agent_args.num_instances} instances")
-            logger.info(f"   Mode de partage : {multi_agent_args.multi_agent_mode}")
+            logger.debug("📊 SCÉNARIO 3 : Partage d'Instances")
+            logger.debug(f"   {multi_agent_args.num_agents} agents, {multi_agent_args.num_instances} instances")
+            logger.debug(f"   Mode de partage : {multi_agent_args.multi_agent_mode}")
 
             # Vérifier que le mode est supporté
             supported_modes = ['independent', 'round_robin', 'majority_vote']
@@ -1331,6 +1665,12 @@ def main():
             logger.warning("Mode weighted inutile avec 1 seul agent")
 
         return True
+
+    # Auto-correct : if only --num-instances provided, set --num-agents to match
+    if args.num_instances > 1 and args.num_agents == 1:
+        logger.warning(f"--num-instances {args.num_instances} provided without --num-agents")
+        logger.warning(f"Auto-setting --num-agents to {args.num_instances} (ONE_TO_ONE scenario)")
+        args.num_agents = args.num_instances
 
     # Appeler validation
     scenario = validate_multi_agent_args(args)
@@ -1440,12 +1780,30 @@ def main():
     set_global_log_level(args.log_level)
     logger.debug(f"Niveau de log global configuré : {args.log_level}")
 
-    # Creer le logger (avec niveau de log)
-    training_logger = TrainingLogger(
-        experiment_name=args.name,
-        base_dir="./logs",
-        console_log_level=args.log_level,
-    )
+    # Create logger(s) - one per agent in multi-agent mode
+    if args.num_agents > 1:
+        # Multi-agent: create separate logger per agent
+        training_loggers = []
+        for agent_idx in range(args.num_agents):
+            agent_logger = TrainingLogger(
+                experiment_name=args.name,
+                base_dir="./logs",
+                console_log_level=args.log_level,
+                agent_id=agent_idx  # Separate logs per agent
+            )
+            training_loggers.append(agent_logger)
+
+        # Use first logger as main logger for compatibility
+        training_logger = training_loggers[0]
+        logger.info(f"📊 Multi-agent logging: {len(training_loggers)} separate log folders created")
+    else:
+        # Single-agent: normal logger
+        training_logger = TrainingLogger(
+            experiment_name=args.name,
+            base_dir="./logs",
+            console_log_level=args.log_level,
+            agent_id=None  # No agent ID for single-agent
+        )
 
     # Forcer la reconnexion de tous les loggers existants à console.log
     # Cela garantit que les loggers créés avant TrainingLogger sont captures
@@ -1556,7 +1914,7 @@ def main():
     # Interface graphique
     gui = None
     if not args.no_gui:
-        logger.info("INTERFACE GRAPHIQUE v2")
+        logger.info("INTERFACE GRAPHIQUE")
 
         try:
             gui = TrainingGUI(title=f"MH Training v2 - {args.name}")
@@ -1703,6 +2061,91 @@ def main():
         else:
             logger.info(f"Mode multi-instances : {args.num_instances} instances")
 
+            # Config file for persistence
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            config_file = os.path.join(script_dir, "dolphin_path_config.json")
+
+            # Try to load saved Dolphin path
+            if args.dolphin_path is None:
+                if os.path.exists(config_file):
+                    try:
+                        with open(config_file, 'r') as f:
+                            saved_config = json.load(f)
+                            saved_path = saved_config.get('dolphin_path')
+
+                            # Validate saved path still exists
+                            if saved_path and os.path.exists(saved_path):
+                                logger.info(f"Using saved Dolphin path: {saved_path}")
+                                args.dolphin_path = saved_path
+                            else:
+                                logger.warning("Saved Dolphin path no longer valid")
+
+                    except Exception as config_load_error:
+                        logger.warning(f"Could not load saved config: {config_load_error}")
+
+                # If still not found, auto-detect or prompt
+                if args.dolphin_path is None:
+                    logger.info("Dolphin path not provided, auto-detecting...")
+                    args.dolphin_path = auto_detect_or_prompt_dolphin_path()
+
+                    # Save the path for next time
+                    try:
+                        with open(config_file, 'w') as f:
+                            json.dump({'dolphin_path': args.dolphin_path}, f, indent=2)
+                        logger.info(f"Dolphin path saved to: {config_file}")
+                    except Exception as config_save_error:
+                        logger.warning(f"Could not save config: {config_save_error}")
+
+            # ====================================================================
+            # VALIDATE DOLPHIN PATH BEFORE LAUNCH
+            # ====================================================================
+            logger.debug(f"Validating Dolphin path: {args.dolphin_path}")
+
+            # Check if path exists
+            if not os.path.exists(args.dolphin_path):
+                error_msg = f"Dolphin path does not exist: {args.dolphin_path}"
+                logger.error("=" * 70)
+                logger.error("DOLPHIN PATH NOT FOUND")
+                logger.error("=" * 70)
+                logger.error(f"Provided path: {args.dolphin_path}")
+                logger.error("")
+                logger.error("SOLUTION:")
+                logger.error("  Use --dolphin-path with valid path:")
+                logger.error(f"     --dolphin-path 'C:\\Path\\To\\Dolphin-x64'")
+                logger.error("=" * 70)
+
+                # Cleanup and exit
+                if gui:
+                    gui.close()
+                return
+
+            logger.debug("Dolphin path validated successfully")
+
+            # ====================================================================
+            # INITIALIZE allocation_result BEFORE launching Dolphin
+            # ====================================================================
+            logger.debug("Initializing allocation_result structure...")
+
+            # Determine scenario early
+            if args.num_agents == args.num_instances:
+                detected_scenario = 'ONE_TO_ONE'
+            elif args.num_agents < args.num_instances:
+                detected_scenario = 'AGENT_MULTIPLE_INSTANCES'
+            else:
+                detected_scenario = 'INSTANCE_SHARING'
+
+            # Initialize allocation_result with empty allocation
+            allocation_result = {
+                'scenario': detected_scenario,
+                'allocation': {},  # Will be filled later
+                'num_agents': args.num_agents,
+                'num_instances': args.num_instances,
+                'dolphin_pids': []  # Will be filled after launch
+            }
+
+            logger.debug(f"Detected scenario: {detected_scenario}")
+            logger.debug("allocation_result initialized successfully")
+
             # ====================================================================
             # ÉTAPE 1 : LANCER DOLPHIN VIA POWERSHELL
             # ====================================================================
@@ -1732,53 +2175,67 @@ def main():
                         with open(pid_file, 'r') as f:
                             pid = int(f.read().strip())
                             dolphin_pids.append(pid)
-                            logger.info(f"Instance {i} : PID {pid}")
+                            logger.info(f"Instance {i}: PID {pid}")
 
-                        # Nettoyer fichier temporaire
+                        # Clean temporary file
                         os.remove(pid_file)
                     else:
-                        logger.warning(f"Instance {i} : Fichier PID non trouvé ({pid_file})")
+                        logger.warning(f"Instance {i}: PID file not found ({pid_file})")
                         dolphin_pids.append(None)
 
                 except Exception as pid_read_error:
-                    logger.error(f"Instance {i} : Erreur lecture PID : {pid_read_error}")
+                    logger.error(f"Instance {i}: Error reading PID: {pid_read_error}")
                     dolphin_pids.append(None)
 
-            # Vérifier qu'on a tous les PIDs
+            # Check if we retrieved all PIDs
             pids_found = sum(1 for pid in dolphin_pids if pid is not None)
 
             if pids_found == 0:
-                logger.error("Aucun PID Dolphin récupéré")
-                logger.error("PowerShell n'a pas créé les fichiers temporaires")
-                logger.error("Vérifier que le script PowerShell fonctionne correctement")
+                logger.error("No Dolphin PID retrieved")
+                logger.error("PowerShell did not create the temporary PID files")
+                logger.error("Check that the PowerShell script is working correctly")
 
                 if gui:
                     gui.close()
                 return
 
             elif pids_found < args.num_instances:
-                logger.warning(f"PIDs partiels : {pids_found}/{args.num_instances}")
-                logger.warning("Certaines instances n'ont pas été détectées")
+                logger.warning(f"Partial PIDs: {pids_found}/{args.num_instances}")
+                logger.warning("Some instances were not detected")
             else:
-                logger.info(f"Tous les PIDs récupérés ({pids_found}/{args.num_instances})")
+                logger.info(f"All PIDs retrieved ({pids_found}/{args.num_instances})")
 
             logger.info("=" * 70)
             logger.info("")
 
-            # Stocker PIDs pour usage ultérieur (monitoring, cleanup, etc.)
-            if 'allocation_result' not in locals():
-                allocation_result = {}
-
+            # Store PIDs in pre-initialized allocation_result
             allocation_result['dolphin_pids'] = dolphin_pids
 
+            # Verify PIDs were stored correctly
+            logger.debug(f"Stored {len(dolphin_pids)} PIDs in allocation_result")
+            logger.debug(f"PIDs: {dolphin_pids}")
+
+            # Register emergency cleanup with atexit and signal handlers
+            # This ensures Dolphin windows are closed even if script crashes
+            def emergency_cleanup_handler():
+                logger.warning("Emergency cleanup triggered")
+                cleanup_dolphin_processes(dolphin_pids)
+
+            atexit.register(emergency_cleanup_handler)
+            signal.signal(signal.SIGINT, lambda sig, frame: (emergency_cleanup_handler(), sys.exit(0)))
+            signal.signal(signal.SIGTERM, lambda sig, frame: (emergency_cleanup_handler(), sys.exit(0)))
+
+            logger.info("Emergency cleanup handlers registered")
+
             if not success:
-                logger.error("Échec lancement instances Dolphin")
+                logger.error("Failed to launch Dolphin instances")
+                cleanup_dolphin_processes(dolphin_pids)  # Explicit cleanup on failure
                 if gui:
                     gui.close()
                 return
 
             # ====================================================================
-            # ÉTAPE 2 : ATTENDRE DÉTECTION FENÊTRES (POLLING 10S)
+            # STEP 2: WAIT FOR WINDOW DETECTION (POLLING 10S)
             # ====================================================================
             windows_ready = wait_for_dolphin_windows(
                 num_instances=args.num_instances,
@@ -1848,12 +2305,21 @@ def main():
 
                     return _init
 
-                # Créer environnements vectorisés
-                from stable_baselines3.common.vec_env import SubprocVecEnv
+                # Create vectorized environments
+                # NOTE: Using DummyVecEnv instead of SubprocVecEnv to avoid pickling issues
+                # with MemoryReader's ctypes callbacks
+                logger.info("Creating vectorized environments...")
 
-                logger.info("Création environnements vectorisés...")
-                env = SubprocVecEnv([make_env(i) for i in range(args.num_instances)])
-                logger.info(f"{args.num_instances} environnements créés (SubprocVecEnv)")
+                # Use DummyVecEnv for compatibility with MemoryReader
+                env = DummyVecEnv([make_env(i) for i in range(args.num_instances)])
+                logger.info(f"{args.num_instances} environments created (DummyVecEnv)")
+
+                # Warn about performance
+                if args.num_instances > 3:
+                    logger.warning("WARNING: Using DummyVecEnv with many instances")
+                    logger.warning("  - Environments run sequentially, not in parallel")
+                    logger.warning("  - Consider using 1-3 instances for better performance")
+                    logger.warning("  - Or fix pickling issue in MemoryReader for true parallelism")
 
                 # ====================================================================
                 # CONFIGURATION HIDHIDE (ISOLATION MANETTES VIRTUELLES)
@@ -1875,14 +2341,32 @@ def main():
                                 logger.info("Initialisation HidHide...")
                                 hidhide = HidHideManager()
 
-                                # Attendre que les manettes soient créées (2s)
-                                logger.info("Attente création manettes virtuelles (2s)...")
-                                time.sleep(2.0)
+                                logger.info("Waiting for virtual controllers creation and driver registration...")
+                                time.sleep(5.0)  # 5s for ViGEm driver registration
 
-                                # Récupérer les contrôleurs depuis les environnements
+                                # Get controllers from environments
                                 controllers = env.env_method('get_controller')
 
-                                logger.info(f"Récupération {len(controllers)} contrôleurs...")
+                                logger.info(f"Retrieved {len(controllers)} controllers...")
+
+                                # Additional verification: check if gamepads are actually created
+                                controllers_ready = 0
+                                for controller in controllers:
+                                    if controller and hasattr(controller, 'gamepad') and controller.gamepad is not None:
+                                        controllers_ready += 1
+
+                                logger.info(f"Controllers with active gamepads: {controllers_ready}/{len(controllers)}")
+
+                                if controllers_ready == 0:
+                                    logger.warning("No active gamepads detected after 5s")
+                                    logger.warning("HidHide isolation will be skipped")
+                                    logger.warning("Possible causes:")
+                                    logger.warning("  1. ViGEmBus driver not loaded")
+                                    logger.warning("  2. Gamepads not created yet (increase delay)")
+                                    logger.warning("  3. Permission issues (run as admin)")
+                                else:
+                                    logger.info(
+                                        f"Proceeding with HidHide configuration for {controllers_ready} controllers...")
 
                                 # Configurer HidHide pour chaque instance
                                 for instance_idx, controller in enumerate(controllers):
@@ -1979,23 +2463,76 @@ def main():
             try:
                 # Test 1 : Reset
                 logger.info("Test 1/3 : Reset global...")
-                obs = env.reset()
-                logger.info(f"{len(obs)} observations reçues")
 
-                # Vérifier structure (premier env)
-                if isinstance(obs[0], dict):
-                    logger.info(f"   Clés : {list(obs[0].keys())}")
-                    for key, value in obs[0].items():
-                        logger.info(f"      {key}: {value.shape}")
+                # VecNormalize might return only obs (legacy) or (obs, info)
+                reset_result = env.reset()
+
+                if isinstance(reset_result, tuple):
+                    obs, reset_info = reset_result
+                    logger.debug("Reset returned (obs, info) tuple")
                 else:
-                    logger.info(f"   Shape : {obs[0].shape}")
+                    obs = reset_result
+                    reset_info = {}
+                    logger.debug("Reset returned obs only (legacy format)")
+
+                # DEBUG: Show what we actually received
+                logger.debug(f"Type of obs: {type(obs)}")
+                if isinstance(obs, dict):
+                    logger.debug(f"Obs is dict with keys: {list(obs.keys())}")
+                elif isinstance(obs, (list, tuple)):
+                    logger.debug(f"Obs is sequence with {len(obs)} elements")
+
+                # Verify structure based on actual type
+                if isinstance(obs, dict):
+                    # Dict observation space (multi-modal)
+                    logger.info(f"Dict observation with {len(obs)} modalities")
+                    logger.info(f"   Keys : {list(obs.keys())}")
+
+                    for key, value in obs.items():
+                        if isinstance(value, np.ndarray):
+                            # VecEnv returns stacked arrays: (num_envs, *shape)
+                            logger.info(f"      {key}: {value.shape} (num_envs={env.num_envs})")
+                        else:
+                            logger.info(f"      {key}: {type(value)}")
+
+                elif isinstance(obs, np.ndarray):
+                    # Single Box observation space
+                    logger.info(f"Box observation: {obs.shape}")
+                else:
+                    logger.warning(f"Unexpected obs type: {type(obs)}")
 
                 # Test 2 : Step
                 logger.info("Test 2/3 : Step (action neutre)...")
-                actions = np.array([0] * env.num_envs, dtype=np.int64)  # Action 0 pour tous
-                obs, rewards, dones, infos = env.step(actions)
-                logger.info(f"Step réussi")
-                logger.info(f"Rewards : {[f'{r:.2f}' for r in rewards]}")
+                actions = np.array([0] * env.num_envs, dtype=np.int64)
+
+                # Get step result and check format BEFORE unpacking
+                step_result = env.step(actions)
+
+                # Debug: log what we actually received
+                logger.debug(f"Step returned {len(step_result)} values (type: {type(step_result)})")
+
+                # Unpack based on actual number of values
+                if len(step_result) == 5:
+                    obs, rewards, dones, truncated, infos = step_result
+                    logger.info(f"Step successful (Gymnasium format: 5 values)")
+                elif len(step_result) == 4:
+                    obs, rewards, dones, infos = step_result
+                    truncated = np.array([False] * env.num_envs, dtype=bool)
+                    logger.info(f"Step successful (legacy format: 4 values)")
+                    logger.warning("Environment returned legacy 4-value format - added dummy truncated")
+                else:
+                    logger.error(f"Unexpected step result: {len(step_result)} values")
+                    logger.error(f"Expected 4 or 5 values, got: {type(step_result)}")
+                    if isinstance(step_result, tuple):
+                        for idx, item in enumerate(step_result):
+                            logger.error(f"  Value {idx}: type={type(item)}, shape={getattr(item, 'shape', 'N/A')}")
+                    return
+
+                # Log step results
+                logger.info(f"Rewards   : {[f'{r:.2f}' for r in rewards]}")
+                logger.info(f"Dones     : {dones}")
+                logger.info(f"Truncated : {truncated}")
+                logger.info(f"Num envs  : {len(rewards)}")
 
                 # Test 3 : Vérifier titres fenêtres
                 logger.info("Test 3/3 : Vérification fenêtres capturées...")
@@ -2094,13 +2631,23 @@ def main():
         logger.info("   Rewards normalisées et clippées")
 
     except (RuntimeError, ValueError, ImportError, OSError) as env_error:
-        # LOGGER L'ERREUR
+        # LOG THE ERROR
         training_logger.log_error(env_error, context="Création environnement")
 
-        logger.error(f"ERREUR création environnement :")
+        logger.error(f"ERROR environment creation :")
         logger.error(f"{env_error}")
         import traceback
         traceback.print_exc()
+
+        # CLEANUP DOLPHIN INSTANCES BEFORE EXITING
+        try:
+            if 'allocation_result' in locals() and allocation_result is not None:
+                dolphin_pids = allocation_result.get('dolphin_pids', [])
+                if dolphin_pids:
+                    logger.warning("Cleaning up Dolphin instances due to error...")
+                    cleanup_dolphin_processes(dolphin_pids)
+        except Exception as cleanup_error:
+            logger.error(f"Error during emergency Dolphin cleanup: {cleanup_error}")
 
         if gui:
             gui.close()
@@ -2369,9 +2916,17 @@ def main():
     )
     callbacks.append(checkpoint_callback)
 
-    # Logging callback
-    logging_callback = LoggingCallback(training_logger)
-    callbacks.append(logging_callback)
+    # Logging callback(s) - one per agent in multi-agent mode
+    if args.num_agents > 1 and 'training_loggers' in locals():
+        # Multi-agent: create callback per agent
+        for agent_idx, agent_logger in enumerate(training_loggers):
+            logging_callback = LoggingCallback(agent_logger)
+            callbacks.append(logging_callback)
+        logger.info(f"📊 {len(training_loggers)} logging callbacks created (one per agent)")
+    else:
+        # Single-agent: normal callback
+        logging_callback = LoggingCallback(training_logger)
+        callbacks.append(logging_callback)
 
     logger.info(f"{len(callbacks)} callbacks configurés")
 
@@ -2877,9 +3432,23 @@ def main():
             logger.warning("Aucun agent à sauvegarder (erreur avant création)")
 
     finally:
-        logger.info("Nettoyage...")
+        logger.info("Cleanup started...")
 
-        # Arrêter le thread d'input proprement si GUI mode
+        # PRIORITY 1: Close Dolphin instances FIRST (before env cleanup)
+        try:
+            if 'allocation_result' in locals() and allocation_result is not None:
+                dolphin_pids = allocation_result.get('dolphin_pids', [])
+                if dolphin_pids:
+                    logger.warning("Closing Dolphin instances...")
+                    cleanup_dolphin_processes(dolphin_pids)
+                else:
+                    logger.debug("No Dolphin PIDs to cleanup")
+            else:
+                logger.debug("allocation_result not found or None")
+        except Exception as dolphin_cleanup_error:
+            logger.error(f"Error cleaning up Dolphin: {dolphin_cleanup_error}")
+
+        # Stop input thread if GUI mode
         try:
             if 'shutdown_flag' in locals() and shutdown_flag is not None:
                 shutdown_flag['value'] = True
@@ -2888,6 +3457,7 @@ def main():
                 if input_thread.is_alive():
                     logger.info("Attente fin du thread d'input...")
                     input_thread.join(timeout=1.0)
+
         except Exception as thread_cleanup_error:
             training_logger.log_error(thread_cleanup_error, context="Nettoyage thread")
             logger.error(f"Erreur nettoyage thread: {thread_cleanup_error}")

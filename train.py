@@ -572,7 +572,7 @@ def wait_for_dolphin_windows(
 
     start_time = time.time()
     attempt = 0
-    windows = []  # Initialize HERE to avoid UnboundLocalError
+    # Don't initialize windows here anymore --> it will be created in the loop
 
     while time.time() - start_time < timeout:
         attempt += 1
@@ -594,10 +594,11 @@ def wait_for_dolphin_windows(
                     })
             return True
 
-        windows = []  # Reset for each attempt
+        # Create fresh list for each detection attempt
+        windows = []
         win32gui.EnumWindows(callback, windows)
 
-        # Sort by title
+        # Sort by title for consistent ordering
         windows.sort(key=lambda x: x['title'])
 
         logger.debug(f"Detected windows : {len(windows)}/{num_instances}")
@@ -1559,99 +1560,94 @@ def main():
     # ============================================================
     def validate_multi_agent_args(multi_agent_args):
         """
-        Valide les arguments multi-agent/instance selon la spécification v1.0
+        Validates multi-agent/instance arguments according to specification v1.0
 
-        Règles de validation :
+        Rules:
         - 1 <= num_agents <= 32
         - 1 <= num_instances <= 16
-        - allocation_map valide si mode manual
-        - paramètres génétiques valides si mode genetic
+        - allocation_map valid if mode manual
+        - genetic parameters valid if mode genetic
         """
 
-        # Validation de base
+        # Basic validation
         if not (1 <= multi_agent_args.num_agents <= 32):
             raise ValueError(
-                f"num_agents doit être entre 1 et 32 (reçu: {multi_agent_args.num_agents})\n"
-                f"Limite recommandée : 16 agents maximum pour performances optimales"
+                f"num_agents must be between 1 and 32 (received: {multi_agent_args.num_agents})\n"
+                f"Recommended limit: 16 agents maximum for optimal performance"
             )
 
         if not (1 <= multi_agent_args.num_instances <= 16):
             raise ValueError(
-                f"num_instances doit être entre 1 et 16 (reçu: {multi_agent_args.num_instances})\n"
-                f"Limite système : 16 instances maximum"
+                f"num_instances must be between 1 and 16 (received: {multi_agent_args.num_instances})\n"
+                f"System limit: 16 instances maximum"
             )
 
-        # Validation steps_per_agent
+        # Validate steps_per_agent
         if hasattr(multi_agent_args, 'steps_per_agent'):
             if multi_agent_args.steps_per_agent < 256:
-                logger.warning(f"steps_per_agent très faible ({multi_agent_args.steps_per_agent})")
-                logger.warning("Recommandé : >= 2048 pour stabilité PPO")
+                logger.warning(f"steps_per_agent very low ({multi_agent_args.steps_per_agent})")
+                logger.warning("Recommended: >= 2048 for PPO stability")
 
-        # UTILISER detect_scenario() au lieu de dupliquer la logique
-        detected_scenario = detect_scenario(
+        # USE detect_scenario() to determine allocation strategy
+        # Renamed variable to avoid shadowing
+        current_scenario = detect_scenario(
             multi_agent_args.num_agents,
             multi_agent_args.num_instances
         )
 
-        # Détecter scénario
-        if detected_scenario == "ONE_TO_ONE":
-            logger.debug("📊 SCÉNARIO 1 : One-to-One (1 agent = 1 instance)")
+        # Scenario-specific validation
+        if current_scenario == "ONE_TO_ONE":
+            logger.debug("📊 SCENARIO 1: One-to-One (1 agent = 1 instance)")
 
-            # Ignorer certains arguments
+            # Ignore certain arguments in this mode
             if multi_agent_args.allocation_mode != 'auto':
-                logger.warning(f"allocation_mode ignoré en mode One-to-One")
+                logger.warning(f"allocation_mode ignored in One-to-One mode")
             if multi_agent_args.multi_agent_mode != 'independent':
-                logger.warning(f"multi_agent_mode ignoré en mode One-to-One")
+                logger.warning(f"multi_agent_mode ignored in One-to-One mode")
 
-        elif detected_scenario == "AGENT_MULTIPLE_INSTANCES":
-            logger.debug("📊 SCÉNARIO 2 : Agent avec Instances Multiples")
+        elif current_scenario == "AGENT_MULTIPLE_INSTANCES":
+            logger.debug("📊 SCENARIO 2: Agent with Multiple Instances")
             logger.debug(f"   {multi_agent_args.num_agents} agents, {multi_agent_args.num_instances} instances")
 
-            # multi_agent_mode non utilisé
+            # multi_agent_mode not used in this scenario
             if multi_agent_args.multi_agent_mode != 'independent':
-                logger.warning(f"multi_agent_mode ignoré (chaque agent a ses propres instances)")
+                logger.warning(f"multi_agent_mode ignored (each agent has its own instances)")
 
-        # detected_scenario == "INSTANCE_SHARING"
-        else:  # multi_agent_args.num_agents > multi_agent_args.num_instances
-            logger.debug("📊 SCÉNARIO 3 : Partage d'Instances")
+        else:  # current_scenario == "INSTANCE_SHARING"
+            logger.debug("📊 SCENARIO 3: Instance Sharing")
             logger.debug(f"   {multi_agent_args.num_agents} agents, {multi_agent_args.num_instances} instances")
-            logger.debug(f"   Mode de partage : {multi_agent_args.multi_agent_mode}")
+            logger.debug(f"   Sharing mode: {multi_agent_args.multi_agent_mode}")
 
-            # Vérifier que le mode est supporté
+            # Verify supported mode
             supported_modes = ['independent', 'round_robin', 'majority_vote']
             if multi_agent_args.multi_agent_mode not in supported_modes:
                 if multi_agent_args.multi_agent_mode == 'genetic':
-                    logger.error("Mode 'genetic' pas encore implémenté")
-                    logger.error("   Modes disponibles : independent, round_robin, majority_vote")
-                    raise NotImplementedError("Mode genetic non implémenté")
+                    logger.error("Mode 'genetic' not yet implemented")
+                    logger.error("   Available modes: independent, round_robin, majority_vote")
+                    raise NotImplementedError("Genetic mode not implemented")
                 else:
-                    raise ValueError(f"Mode inconnu : {multi_agent_args.multi_agent_mode}")
+                    raise ValueError(f"Unknown mode: {multi_agent_args.multi_agent_mode}")
 
-        # Validation allocation_map si manual
+        # Validate allocation_map if manual mode
         if multi_agent_args.allocation_mode == 'manual':
             if multi_agent_args.allocation_map is None:
-                raise ValueError("allocation_map requis en mode manual")
+                raise ValueError("allocation_map required in manual mode")
 
-            # Parser et valider le format
-            # Format: "0:1,2;1:3,4" → {0: [1,2], 1: [3,4]}
-            # La validation complète est faite dans parse_allocation_map()
-            # qui vérifie le format, les clés, et les contraintes par scénario
-
-        # Validation mode genetic
+        # Validate genetic mode parameters
         if multi_agent_args.multi_agent_mode == 'genetic':
             if multi_agent_args.genetic_generations < 1:
-                raise ValueError("genetic_generations doit être >= 1")
+                raise ValueError("genetic_generations must be >= 1")
             if not (0.0 < multi_agent_args.genetic_elite_ratio < 1.0):
-                raise ValueError("genetic_elite_ratio doit être entre 0 et 1")
+                raise ValueError("genetic_elite_ratio must be between 0 and 1")
             if not (0.0 <= multi_agent_args.genetic_mutation_rate <= 1.0):
-                raise ValueError("genetic_mutation_rate doit être entre 0 et 1")
+                raise ValueError("genetic_mutation_rate must be between 0 and 1")
 
-        # Validation block_size pour round_robin
+        # Validate block_size for round_robin
         if multi_agent_args.multi_agent_mode == 'round_robin':
             if multi_agent_args.block_size < 1:
-                raise ValueError("block_size doit être >= 1")
+                raise ValueError("block_size must be >= 1")
 
-        return detected_scenario
+        return current_scenario
 
     def validate_weighted_params(args_to_validate):
         """
@@ -1694,10 +1690,10 @@ def main():
             mapping = []
             current_instance = 0
 
-            for agent_idx in range(num_agents):
-                count = instances_per_agent + (1 if agent_idx < remainder else 0)
+            for agent_identification in range(num_agents):
+                count = instances_per_agent + (1 if agent_identification < remainder else 0)
                 example_instances = list(range(current_instance, current_instance + count))
-                mapping.append(f"{agent_idx}:{','.join(map(str, example_instances))}")
+                mapping.append(f"{agent_identification}:{','.join(map(str, example_instances))}")
                 current_instance += count
 
             return ';'.join(mapping)
@@ -1781,6 +1777,9 @@ def main():
     logger.debug(f"Niveau de log global configuré : {args.log_level}")
 
     # Create logger(s) - one per agent in multi-agent mode
+    # Initialize training_loggers to None for all cases
+    training_loggers = None
+
     if args.num_agents > 1:
         # Multi-agent: create separate logger per agent
         training_loggers = []
@@ -2502,37 +2501,46 @@ def main():
                     logger.warning(f"Unexpected obs type: {type(obs)}")
 
                 # Test 2 : Step
-                logger.info("Test 2/3 : Step (action neutre)...")
+                logger.info("Test 2/3 : Step (neutral action)...")
                 actions = np.array([0] * env.num_envs, dtype=np.int64)
 
-                # Get step result and check format BEFORE unpacking
-                step_result = env.step(actions)
+                try:
+                    # Simple step call with basic unpacking
+                    step_result = env.step(actions)
 
-                # Debug: log what we actually received
-                logger.debug(f"Step returned {len(step_result)} values (type: {type(step_result)})")
+                    # Detect format by checking result length
+                    result_length = len(step_result)
 
-                # Unpack based on actual number of values
-                if len(step_result) == 5:
-                    obs, rewards, dones, truncated, infos = step_result
-                    logger.info(f"Step successful (Gymnasium format: 5 values)")
-                elif len(step_result) == 4:
-                    obs, rewards, dones, infos = step_result
-                    truncated = np.array([False] * env.num_envs, dtype=bool)
-                    logger.info(f"Step successful (legacy format: 4 values)")
-                    logger.warning("Environment returned legacy 4-value format - added dummy truncated")
-                else:
-                    logger.error(f"Unexpected step result: {len(step_result)} values")
-                    logger.error(f"Expected 4 or 5 values, got: {type(step_result)}")
-                    if isinstance(step_result, tuple):
-                        for idx, item in enumerate(step_result):
-                            logger.error(f"  Value {idx}: type={type(item)}, shape={getattr(item, 'shape', 'N/A')}")
+                    if result_length == 5:
+                        # Gymnasium format: obs, reward, terminated, truncated, info
+                        # noinspection PyTypeChecker,PyTupleAssignmentBalance
+                        obs, rewards, terminated, truncated, infos = step_result
+                        # Convert terminated/truncated to dones for compatibility
+                        dones = np.logical_or(terminated, truncated)
+                        logger.info("Step successful (Gymnasium format: 5 values)")
+                    elif result_length == 4:
+                        # Legacy format: obs, reward, done, info
+                        obs, rewards, dones, infos = step_result
+                        # Create truncated array for compatibility
+                        truncated = np.array([False] * env.num_envs, dtype=bool)
+                        logger.info("Step successful (legacy format: 4 values)")
+                    else:
+                        # Unexpected format - log detailed error
+                        logger.error(f"Unexpected step() return format: {result_length} values")
+                        logger.error(f"Expected 4 (legacy) or 5 (Gymnasium) values")
+                        logger.error(f"step_result types: {[type(x).__name__ for x in step_result]}")
+                        raise ValueError(
+                            f"env.step() returned {result_length} values, expected 4 or 5. "
+                            f"Check your VecEnv configuration."
+                        )
+
+                except Exception as step_test_error:
+                    logger.error(f"Step test error: {step_test_error}")
+                    import traceback
+                    traceback.print_exc()
+                    if gui:
+                        gui.close()
                     return
-
-                # Log step results
-                logger.info(f"Rewards   : {[f'{r:.2f}' for r in rewards]}")
-                logger.info(f"Dones     : {dones}")
-                logger.info(f"Truncated : {truncated}")
-                logger.info(f"Num envs  : {len(rewards)}")
 
                 # Test 3 : Vérifier titres fenêtres
                 logger.info("Test 3/3 : Vérification fenêtres capturées...")
@@ -2917,7 +2925,8 @@ def main():
     callbacks.append(checkpoint_callback)
 
     # Logging callback(s) - one per agent in multi-agent mode
-    if args.num_agents > 1 and 'training_loggers' in locals():
+    # Check if training_loggers is not None instead of using locals()
+    if args.num_agents > 1 and training_loggers is not None:
         # Multi-agent: create callback per agent
         for agent_idx, agent_logger in enumerate(training_loggers):
             logging_callback = LoggingCallback(agent_logger)

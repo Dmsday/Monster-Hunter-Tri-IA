@@ -1055,7 +1055,7 @@ def main():
       # Multi-agents mode genetic (évolution)
       python train.py --num-agents 16 --num-instances 8 --multi-agent-mode genetic --genetic-generations 10
 
-    Pour plus d'informations : https://github.com/votre-repo
+    Pour plus d'informations : https://github.com/Dmsday/Monster-Hunter-Tri-IA
             '''
     )
 
@@ -1136,11 +1136,6 @@ def main():
                              default='C:/Dolphin/Dolphin.exe',
                              metavar='PATH',
                              help='Chemin vers Dolphin.exe')
-
-    multi_group.add_argument('--game-iso', type=str,
-                             default='C:/Games/MHTri.iso',
-                             metavar='PATH',
-                             help='Chemin vers Monster Hunter Tri ISO')
 
     multi_group.add_argument('--allocation-mode', type=str, default='auto',
                              choices=['auto', 'manual', 'weighted'],
@@ -1787,7 +1782,7 @@ def main():
             # ====================================================================
             windows_ready = wait_for_dolphin_windows(
                 num_instances=args.num_instances,
-                timeout=60,  # Timeout 60s
+                timeout=args.dolphin_timeout,  # Timeout 60s
                 check_interval=10  # Check toutes les 10s
             )
 

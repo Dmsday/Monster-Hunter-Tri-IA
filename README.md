@@ -115,7 +115,7 @@ monster_hunter_ai/
 │
 ├── train.py                         # Training script (single/multi-agent)
 ├── test.py                          # Testing script
-├── check_setup.py                   # Setup diagnostic tool
+├── check_setup.py                   # Setup diagnostic tool (to provide)
 ├── launch_dolphin_instances.ps1     # PowerShell script for multi-instance
 └── requirements.txt                 # Python dependencies
 ```

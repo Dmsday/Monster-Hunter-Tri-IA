@@ -186,6 +186,11 @@ class MonsterHunterEnv(gym.Env):
                     logger.error("  1. Dolphin not running")
                     logger.error("  2. Dolphin not started as admin")
                     logger.error("  3. Game not loaded")
+                    # More specific error message for hook failure
+                    logger.error("DIAGNOSIS:")
+                    logger.error("  MemoryReader.__init__() returned None or failed to hook")
+                    logger.error("  This usually means Dolphin is not running as ADMINISTRATOR")
+                    logger.error("")
                     raise RuntimeError("MemoryReader initialization failed")
 
                 logger.info("Memory reader en mode asynchrone (lecture rewards)")
@@ -198,6 +203,11 @@ class MonsterHunterEnv(gym.Env):
                 logger.error(f"ERREUR critique: MemoryReader non disponible: {init_memory_error}")
                 logger.error("Les rewards ne fonctionneront pas")
                 self.memory = None
+                # Re-raise with clear message instead of silently continuing
+                raise RuntimeError(
+                    f"MemoryReader failed to initialize: {init_memory_error}. "
+                    "Check that Dolphin is running as Administrator with Monster Hunter Tri loaded."
+                )
         else:
             # Cas theorique (jamais atteint grace au "or True")
             logger.warning("Memory desactivee completement (rewards non disponibles)")
@@ -537,7 +547,7 @@ class MonsterHunterEnv(gym.Env):
                 logger.error(f"Erreur thread capture: {thread_capture_error}")
                 time.sleep(0.1)  # Pause avant retry
 
-        logger.debug("🛑 Thread de capture arrêté")
+        logger.debug("Thread de capture arrêté")
 
     def reset(self, seed=None, options=None):
         """
@@ -1772,8 +1782,7 @@ class MonsterHunterEnv(gym.Env):
         reload_wait_time = 3.0
 
         for attempt in range(1, max_reload_attempt + 1):
-            logger.info(
-                f"Rechargement save state {self.save_state_slot} (F{self.save_state_slot}) - Tentative {attempt}/{max_reload_attempt}...")
+            logger.info(f"Rechargement save state {self.save_state_slot} (F{self.save_state_slot}) - Tentative {attempt}/{max_reload_attempt}...")
 
             try:
                 # Appuyer sur F5
@@ -2058,14 +2067,14 @@ class MonsterHunterEnv(gym.Env):
         """
         Nettoyage
         """
-        logger.info("🛑 Fermeture de l'environnement...")
+        logger.info("Fermeture de l'environnement...")
 
         # Arrêter thread de capture
         self._capture_running = False
         if self._capture_thread and self._capture_thread.is_alive():
             self._capture_thread.join(timeout=2.0)
-            logger.info(f"Frames capturées: {self._frames_captured}")
-            logger.info(f"Frames utilisées: {self._frames_consumed}")
+            logger.debug(f"Frames capturées: {self._frames_captured}")
+            logger.debug(f"Frames utilisées: {self._frames_consumed}")
 
         # Nettoyer objets GDI
         if self.frame_capture:
@@ -2074,7 +2083,6 @@ class MonsterHunterEnv(gym.Env):
         # Reset du controller
         if self.controller:
             try:
-                logger.info("🎮 Nettoyage contrôleur...")
                 self.controller.cleanup()  # Appel explicite à cleanup()
                 self.controller = None  # Libérer la référence
             except Exception as controller_cleanup_error:

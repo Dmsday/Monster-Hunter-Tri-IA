@@ -16,7 +16,6 @@ import logging                 # Logging (for reconnecting handlers)
 import subprocess              # Launching Dolphin process via PowerShell
 from datetime import datetime  # Timestamps for experiment names
 import atexit                  # Emergency cleanup on script exit
-import signal                  # Signal handling for Ctrl+C and crashes
 import json                    # Config persistence
 
 # ============================================================================
@@ -118,6 +117,8 @@ logger.debug(f"Total: 19 possible actions (0-18)")
 # ============================================================================
 # MULTI-INSTANCE FUNCTIONS
 # ============================================================================
+# Global flag to prevent double cleanup (atexit + finally)
+_cleanup_done = False
 
 def launch_dolphin_instances_via_powershell(
         num_instances: int,
@@ -276,21 +277,43 @@ def launch_dolphin_instances_via_powershell(
     logger.debug(f"  {' '.join(ps_args)}")
     logger.debug("")
 
+    # Use Popen instead of run to handle KeyboardInterrupt properly
+    # noinspection PyUnusedLocal
+    ps_process = None
+
     try:
         logger.debug("Starting PowerShell...")
         logger.debug("Waiting for script completion...")
         logger.debug("")
 
-        # Launch PowerShell
-        result = subprocess.run(
+        # Launch PowerShell with Popen (keeps process reference)
+        ps_process = subprocess.Popen(
             ps_args,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            check=True,
-            timeout=dynamic_timeout,
             cwd=script_dir,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
+
+        # Wait with timeout and capture output
+        stdout, stderr = ps_process.communicate(timeout=dynamic_timeout)
+
+        # Check return code manually
+        if ps_process.returncode != 0:
+            raise subprocess.CalledProcessError(
+                ps_process.returncode,
+                ps_args,
+                output=stdout,
+                stderr=stderr
+            )
+
+        # Create result object compatible with old code
+        result = type('obj', (object,), {
+            'stdout': stdout,
+            'stderr': stderr,
+            'returncode': ps_process.returncode
+        })()
 
         logger.debug("PowerShell completed successfully")
 
@@ -344,6 +367,61 @@ def launch_dolphin_instances_via_powershell(
 
         return True
 
+    # Handle Ctrl+C during PowerShell execution
+    except KeyboardInterrupt:
+        logger.warning("")
+        logger.warning("=" * 70)
+        logger.warning("INTERRUPTED DURING DOLPHIN LAUNCH (Ctrl+C)")
+        logger.warning("=" * 70)
+
+        # Terminate PowerShell process if still running
+        if ps_process and ps_process.poll() is None:
+            logger.warning("Terminating PowerShell process...")
+            ps_process.terminate()
+            try:
+                ps_process.wait(timeout=2)
+                logger.debug("PowerShell terminated")
+            except subprocess.TimeoutExpired:
+                logger.warning("PowerShell did not terminate, forcing kill...")
+                ps_process.kill()
+                logger.debug("PowerShell killed")
+
+        # Try to read any PIDs that were created before interruption
+        logger.warning("Checking for Dolphin instances that were launched...")
+        script_dir_local = os.path.dirname(os.path.abspath(__file__))
+        launched_pids = []
+
+        for i in range(num_instances):
+            pid_file = os.path.join(script_dir_local, f"dolphin_pid_{i}.tmp")
+            try:
+                if os.path.exists(pid_file):
+                    with open(pid_file, 'r') as f:
+                        pid_str = f.read().strip()
+                        if pid_str and pid_str != "-1":
+                            pid = int(pid_str)
+                            if pid > 0:
+                                launched_pids.append(pid)
+                                logger.debug(f"Found Dolphin PID {pid} from file")
+                    # Clean up PID file
+                    os.remove(pid_file)
+                    logger.debug(f"Removed PID file: {pid_file}")
+            except Exception as pid_read_error:
+                logger.debug(f"Could not read PID file {pid_file}: {pid_read_error}")
+
+        if launched_pids:
+            logger.warning(f"Found {len(launched_pids)} Dolphin instance(s) to close...")
+            cleanup_dolphin_processes(launched_pids, emergency=True)
+            logger.info("Dolphin instances cleanup completed")
+        else:
+            logger.warning("No Dolphin PIDs found")
+            logger.warning("If Dolphin windows are open, close them manually")
+
+        logger.warning("=" * 70)
+        logger.warning("")
+
+        # Re-raise KeyboardInterrupt to propagate to main() handler
+        raise
+
     except subprocess.TimeoutExpired:
         logger.error(f"PowerShell timeout ({dynamic_timeout}s exceeded)")
         logger.error("Dolphin instances are taking too long to load")
@@ -377,7 +455,6 @@ def launch_dolphin_instances_via_powershell(
         logger.error(f"Unexpected error: {ps_error}")
         traceback.print_exc()
         return False
-
 
 def auto_detect_or_prompt_dolphin_path() -> str:
     """
@@ -469,8 +546,12 @@ def auto_detect_or_prompt_dolphin_path() -> str:
                 logger.error(f"Invalid path: {user_path}")
 
         except KeyboardInterrupt:
-            logger.error("\nCancelled by user")
-            sys.exit(1)
+            logger.warning("")
+            logger.warning("CANCELLED BY USER (Ctrl+C)")
+            logger.warning("Dolphin path prompt cancelled")
+            logger.warning("Exiting...")
+            sys.exit(0)
+
         except Exception as prompt_error:
             logger.error(f"Error: {prompt_error}")
             continue
@@ -480,20 +561,25 @@ def auto_detect_or_prompt_dolphin_path() -> str:
     # But it removes the PyCharm warning "Missing return statement"
     raise RuntimeError("Unreachable code ; function always returns or exits")
 
-def cleanup_dolphin_processes(dolphin_pids: list):
+def cleanup_dolphin_processes(dolphin_pids: list, emergency: bool = False):
     """
-    Emergency cleanup: forcefully close all Dolphin instances
+    Cleanup: forcefully close all Dolphin instances
     Called automatically on script exit (normal or crash)
 
     Args:
         dolphin_pids: List of Dolphin process IDs to terminate
+        emergency: True if called during crash/interrupt, False for normal cleanup
     """
+    # Declare global at the very beginning of function
+    global _cleanup_done
+
     if not dolphin_pids:
         logger.debug("No Dolphin PIDs to cleanup")
         return
 
+    cleanup_type = "EMERGENCY CLEANUP" if emergency else "CLEANUP"
     logger.warning("=" * 70)
-    logger.warning("EMERGENCY CLEANUP: Closing all Dolphin instances")
+    logger.warning(f"{cleanup_type}: Closing all Dolphin instances")
     logger.warning("=" * 70)
 
     import psutil
@@ -1355,6 +1441,8 @@ def main():
     """
     Script d'entraînement principal v2
     """
+    global _cleanup_done
+
     # ============================================================
     # ARGUMENTS AVEC AIDE DÉTAILLÉE
     # ============================================================
@@ -2121,7 +2209,7 @@ def main():
             logger.debug("Dolphin path validated successfully")
 
             # ====================================================================
-            # INITIALIZE allocation_result BEFORE launching Dolphin
+            # INITIALIZE allocation_result
             # ====================================================================
             logger.debug("Initializing allocation_result structure...")
 
@@ -2146,7 +2234,77 @@ def main():
             logger.debug("allocation_result initialized successfully")
 
             # ====================================================================
-            # ÉTAPE 1 : LANCER DOLPHIN VIA POWERSHELL
+            # CHECK AND CLOSE EXISTING DOLPHIN INSTANCES
+            # ====================================================================
+            logger.info("")
+            logger.info("=" * 70)
+            logger.info("CHECKING FOR EXISTING DOLPHIN INSTANCES")
+            logger.info("=" * 70)
+
+            try:
+                # noinspection PyUnusedImports
+                import psutil
+
+                # Find all running Dolphin.exe processes
+                existing_dolphin = []
+                for proc in psutil.process_iter(['pid', 'name', 'exe']):
+                    try:
+                        if proc.info['name'] and 'dolphin' in proc.info['name'].lower():
+                            # Verify it's actually Dolphin.exe (not dolphin-related files)
+                            if proc.info['exe'] and 'dolphin.exe' in proc.info['exe'].lower():
+                                existing_dolphin.append(proc.info['pid'])
+                    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                        pass
+
+                if existing_dolphin:
+                    logger.warning(f"Found {len(existing_dolphin)} existing Dolphin instance(s)")
+                    logger.warning(f"PIDs: {existing_dolphin}")
+                    logger.warning("")
+                    logger.warning("These instances will interfere with memory hook!")
+                    logger.warning("Closing them automatically...")
+                    logger.warning("")
+
+                    # Close all existing instances
+                    cleanup_dolphin_processes(existing_dolphin, emergency=False)
+
+                    # Verify cleanup succeeded
+                    time.sleep(1.0)
+                    still_running = [pid for pid in existing_dolphin if psutil.pid_exists(pid)]
+
+                    if still_running:
+                        logger.error("=" * 70)
+                        logger.error("FAILED TO CLOSE EXISTING DOLPHIN INSTANCES")
+                        logger.error("=" * 70)
+                        logger.error(f"Still running: {still_running}")
+                        logger.error("")
+                        logger.error("SOLUTION:")
+                        logger.error("  1. Close Dolphin manually via Task Manager")
+                        logger.error("  2. Run training script again")
+                        logger.error("=" * 70)
+
+                        if gui:
+                            gui.close()
+
+                        _cleanup_done = True
+                        return
+                    else:
+                        logger.info("All existing Dolphin instances closed successfully")
+                else:
+                    logger.info("No existing Dolphin instances found")
+
+            except ImportError:
+                logger.warning("psutil not available. Cannot check for existing Dolphin")
+                logger.warning("Install with: pip install psutil")
+            except Exception as check_error:
+                logger.error(f"Error checking existing Dolphin: {check_error}")
+                import traceback
+                traceback.print_exc()
+
+            logger.info("=" * 70)
+            logger.info("")
+
+            # ====================================================================
+            # STEP 1: LAUNCH DOLPHIN VIA POWERSHELL
             # ====================================================================
             success = launch_dolphin_instances_via_powershell(
                 num_instances=args.num_instances,
@@ -2176,8 +2334,9 @@ def main():
                             dolphin_pids.append(pid)
                             logger.info(f"Instance {i}: PID {pid}")
 
-                        # Clean temporary file
-                        os.remove(pid_file)
+                        # Keep PID file for emergency cleanup
+                        # Don't remove it yet, will be cleaned up after training starts
+                        logger.debug(f"Keeping PID file for emergency cleanup: {pid_file}")
                     else:
                         logger.warning(f"Instance {i}: PID file not found ({pid_file})")
                         dolphin_pids.append(None)
@@ -2216,22 +2375,139 @@ def main():
 
             # Register emergency cleanup with atexit and signal handlers
             # This ensures Dolphin windows are closed even if script crashes
+            # SIGINT (Ctrl+C) and SIGTERM are handled separately as normal shutdown
             def emergency_cleanup_handler():
-                logger.warning("Emergency cleanup triggered")
-                cleanup_dolphin_processes(dolphin_pids)
+                # Declare global at the very beginning of function
+                global _cleanup_done
 
+                # Skip if cleanup already done in finally block
+                if _cleanup_done:
+                    logger.debug("Cleanup already done, skipping atexit handler")
+                    return
+
+                logger.warning("Emergency cleanup triggered (unexpected termination)")
+
+                # Access dolphin_pids from allocation_result if available
+                pids_to_cleanup = []
+                try:
+                    if 'allocation_result' in globals() and allocation_result is not None:
+                        pids_to_cleanup = allocation_result.get('dolphin_pids', [])
+
+                    if pids_to_cleanup:
+                        cleanup_dolphin_processes(pids_to_cleanup, emergency=True)
+                    else:
+                        logger.debug("No Dolphin PIDs found for emergency cleanup")
+                except Exception as emergency_error:
+                    logger.error(f"Emergency cleanup error: {emergency_error}")
+
+                _cleanup_done = True
+
+            # Register for unexpected exits (crashes)
             atexit.register(emergency_cleanup_handler)
-            signal.signal(signal.SIGINT, lambda sig, frame: (emergency_cleanup_handler(), sys.exit(0)))
-            signal.signal(signal.SIGTERM, lambda sig, frame: (emergency_cleanup_handler(), sys.exit(0)))
 
-            logger.info("Emergency cleanup handlers registered")
+            # Don't register SIGINT/SIGTERM here, they're handled in the finally block as normal cleanup
+            logger.info("Emergency cleanup handler registered")
 
             if not success:
                 logger.error("Failed to launch Dolphin instances")
-                cleanup_dolphin_processes(dolphin_pids)  # Explicit cleanup on failure
+                cleanup_dolphin_processes(dolphin_pids, emergency=True)  # Explicit cleanup on failure
                 if gui:
                     gui.close()
+                _cleanup_done = True
                 return
+
+            # ====================================================================
+            # VALIDATE BACKGROUND INPUT CONFIGURATION
+            # ====================================================================
+            logger.info("")
+            logger.info("=" * 70)
+            logger.info("VALIDATING BACKGROUND INPUT")
+            logger.info("=" * 70)
+
+            try:
+                import configparser
+
+                dolphin_dir = os.path.dirname(args.dolphin_path)
+                validation_passed = True
+
+                for instance_id in range(args.num_instances):
+                    # Instance 0 uses "User", others use "User1", "User2", etc.
+                    user_folder_name = "User" if instance_id == 0 else f"User{instance_id}"
+                    user_folder = os.path.join(dolphin_dir, user_folder_name)
+                    dolphin_ini = os.path.join(user_folder, "Config", "Dolphin.ini")
+
+                    if not os.path.exists(dolphin_ini):
+                        logger.warning(f"Instance {instance_id}: Dolphin.ini not found")
+                        logger.warning(f"Expected: {dolphin_ini}")
+                        validation_passed = False
+                        continue
+
+                    # Parse INI file
+                    config = configparser.ConfigParser()
+                    config.read(dolphin_ini)
+
+                    # Check BackgroundInput setting
+                    if config.has_option('Input', 'BackgroundInput'):
+                        value = config.get('Input', 'BackgroundInput')
+                        if value.lower() in ['true', '1', 'yes']:
+                            logger.info(f"Instance {instance_id}: Background Input ENABLED")
+                        else:
+                            logger.warning(f"Instance {instance_id}: Background Input DISABLED")
+                            logger.warning(f"   Current value: {value}")
+                            validation_passed = False
+                    else:
+                        logger.warning(f"Instance {instance_id}: BackgroundInput setting not found")
+                        validation_passed = False
+
+                if not validation_passed:
+                    logger.error("")
+                    logger.error("BACKGROUND INPUT NOT PROPERLY CONFIGURED")
+                    logger.error("=" * 70)
+                    logger.error("Multi-instance training requires Background Input enabled")
+                    logger.error("=" * 70)
+
+                    try:
+                        user_input = input("\nContinue anyway? (y/N): ")
+                        if user_input.lower() != 'y':
+                            logger.info("Training cancelled by user")
+
+                            # Cleanup Dolphin instances
+                            logger.warning("Closing Dolphin instances...")
+                            cleanup_dolphin_processes(dolphin_pids, emergency=False)
+
+                            if gui:
+                                gui.close()
+
+                            _cleanup_done = True
+                            return
+
+                    except KeyboardInterrupt:
+                        logger.warning("")
+                        logger.warning("=" * 70)
+                        logger.warning("CANCELLED BY USER (Ctrl+C)")
+                        logger.warning("=" * 70)
+                        logger.warning("Closing Dolphin instances...")
+
+                        cleanup_dolphin_processes(dolphin_pids, emergency=False)
+                        _cleanup_done = True
+
+                        if gui:
+                            gui.close()
+
+                        _cleanup_done = True
+                        logger.warning("Cleanup complete")
+                        logger.warning("=" * 70)
+                        return
+                else:
+                    logger.info("")
+                    logger.info("All instances have Background Input enabled")
+
+            except Exception as validation_error:
+                logger.error(f"Background Input validation failed: {validation_error}")
+                logger.warning("Continuing without validation...")
+
+            logger.info("=" * 70)
+            logger.info("")
 
             # ====================================================================
             # STEP 2: WAIT FOR WINDOW DETECTION (POLLING 10S)
@@ -2647,18 +2923,92 @@ def main():
         import traceback
         traceback.print_exc()
 
-        # CLEANUP DOLPHIN INSTANCES BEFORE EXITING
+        # CLEANUP DOLPHIN INSTANCES BEFORE EXITING - FORCE CLEANUP
+        logger.warning("")
+        logger.warning("=" * 70)
+        logger.warning("ENVIRONMENT CREATION FAILED - CLEANING UP DOLPHIN")
+        logger.warning("=" * 70)
+
         try:
+            # Check if allocation_result exists in the correct scope
+            # allocation_result is initialized earlier but might not have PIDs yet
+            dolphin_pids = []
+
+            # Try to get PIDs from allocation_result if it exists
             if 'allocation_result' in locals() and allocation_result is not None:
                 dolphin_pids = allocation_result.get('dolphin_pids', [])
-                if dolphin_pids:
-                    logger.warning("Cleaning up Dolphin instances due to error...")
-                    cleanup_dolphin_processes(dolphin_pids)
+                logger.debug(f"Found {len(dolphin_pids)} PIDs in allocation_result")
+
+            # If allocation_result has no PIDs, try reading from PID files
+            # This handles the case where Dolphin launched but env creation failed
+            if not dolphin_pids and args.num_instances > 1:
+                logger.warning("No PIDs in allocation_result, attempting to read from PID files...")
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+
+                for i in range(args.num_instances):
+                    pid_file = os.path.join(script_dir, f"dolphin_pid_{i}.tmp")
+                    try:
+                        if os.path.exists(pid_file):
+                            with open(pid_file, 'r') as f:
+                                pid = int(f.read().strip())
+                                if pid > 0:
+                                    dolphin_pids.append(pid)
+                                    logger.debug(f"Recovered PID {pid} from file {pid_file}")
+                            # Clean up PID file
+                            os.remove(pid_file)
+                    except Exception as pid_recovery_error:
+                        logger.debug(f"Could not recover PID from {pid_file}: {pid_recovery_error}")
+
+            # Filter valid PIDs
+            valid_pids = [pid for pid in dolphin_pids if pid is not None and pid > 0]
+
+            if valid_pids:
+                logger.warning(f"Closing {len(valid_pids)} Dolphin instance(s)...")
+                cleanup_dolphin_processes(valid_pids, emergency=True)
+
+                # Verify cleanup with detailed status
+                import psutil
+                time.sleep(1.0)  # Wait for processes to fully terminate
+
+                still_running = []
+                for pid in valid_pids:
+                    if psutil.pid_exists(pid):
+                        still_running.append(pid)
+                        logger.error(f"  PID {pid} still running - attempting force kill...")
+                        try:
+                            process = psutil.Process(pid)
+                            process.kill()
+                            process.wait(timeout=2)
+                            logger.warning(f"  PID {pid} force killed")
+                        except Exception as force_kill_error:
+                            logger.error(f"  Failed to force kill PID {pid}: {force_kill_error}")
+
+                if not still_running:
+                    logger.info("All Dolphin instances closed successfully")
+                else:
+                    logger.error(f"WARNING: {len(still_running)} Dolphin process(es) still running: {still_running}")
+                    logger.error("You may need to close them manually via Task Manager")
+            else:
+                logger.warning("No valid Dolphin PIDs found for cleanup")
+                logger.warning("If Dolphin instances are running, close them manually")
+
         except Exception as cleanup_error:
             logger.error(f"Error during emergency Dolphin cleanup: {cleanup_error}")
+            import traceback
+            traceback.print_exc()
+            logger.error("")
+            logger.error("DOLPHIN CLEANUP FAILED - PLEASE CLOSE MANUALLY")
+            logger.error("Open Task Manager (Ctrl+Shift+Esc) and end Dolphin.exe processes")
+
+        logger.warning("=" * 70)
+        logger.warning("")
 
         if gui:
             gui.close()
+
+        # Mark cleanup done to prevent atexit handler
+        _cleanup_done = True
+
         return
 
     # ====================================================================
@@ -3117,7 +3467,7 @@ def main():
 
             def wait_for_enter():
                 """
-                Thread qui attend ENTRÉE sans bloquer le GUI
+                Thread waiting for ENTER without blocking the GUI
                 """
                 try:
                     # La fonction input() met le thread en pause jusqu'à ce que l'utilisateur appuie sur la touche ENTRÉE.
@@ -3129,23 +3479,28 @@ def main():
                     # non valides selon l'encodage attendu (par exemple, un terminal exotique).
                     # Dans ce cas, on ignore l’erreur et on quitte proprement la fonction.
                     return
-
                 except (EOFError, KeyboardInterrupt):
                     # --- Flux d'entrée fermé ou interruption clavier ---
                     # EOFError : le flux stdin a été fermé (par ex. fin de fichier, fermeture de terminal).
                     # KeyboardInterrupt : l'utilisateur a interrompu le programme avec Ctrl+C.
                     # Si le programme n’est pas déjà en cours d’arrêt, on interprète cette
                     # interruption comme une demande de "start" (par cohérence avec le reste du code).
+                    # Don't mark as started if interrupted
+                    # Let the main thread handle cleanup
                     if not shutdown_flag['value']:
-                        start_requested['value'] = True  # Active le signal de démarrage
-                        start_requested['by_user'] = True  # Marque que le déclenchement vient de l’utilisateur
-
+                        logger.debug("Input thread interrupted")
+                    return
+                except Exception as input_error:
+                    logger.debug(f"Input thread error: {input_error}")
+                    return
                 else:
                     # --- Cas normal : l’utilisateur a appuyé sur ENTRÉE ---
                     # Aucun problème d’encodage ni d’interruption ; l’entrée s’est déroulée normalement.
                     # On considère que l’utilisateur souhaite lancer le processus principal.
-                    start_requested['value'] = True  # Active le signal de démarrage
-                    start_requested['by_user'] = True  # Indique que la demande provient de l’utilisateur
+                    # Only mark as started if clean input received
+                    if not shutdown_flag['value']:
+                        start_requested['value'] = True  # Active le signal de démarrage
+                        start_requested['by_user'] = True  # Indique que la demande provient de l’utilisateur
 
             # Lancer le thread d'attente
             input_thread = threading.Thread(target=wait_for_enter, daemon=True)
@@ -3187,6 +3542,18 @@ def main():
 
             logger.warning("🚀 Lancement de l'entraînement...")
 
+            # Clean up PID files now that training has started successfully
+            if args.num_instances > 1:
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                for i in range(args.num_instances):
+                    pid_file = os.path.join(script_dir, f"dolphin_pid_{i}.tmp")
+                    try:
+                        if os.path.exists(pid_file):
+                            os.remove(pid_file)
+                            logger.debug(f"Cleaned up PID file: {pid_file}")
+                    except Exception as pid_cleanup_error:
+                        logger.debug(f"Could not remove PID file {pid_file}: {pid_cleanup_error}")
+
             # Activer le bouton Stop de la GUI
             if hasattr(gui, 'stop_button'):
                 gui.stop_button.config(state=tk.NORMAL)
@@ -3198,12 +3565,92 @@ def main():
             logger.warning("🚀 Démarrage de l'entraînement...")
 
     except KeyboardInterrupt:
-        logger.info("Annulation demandée avant le démarrage (Ctrl+C)")
-        logger.info("Nettoyage...")
-        env.close()
-        if gui:
-            gui.close()
-        logger.info("Terminé")
+        logger.info("CANCELLED BEFORE TRAINING START (Ctrl+C)")
+        logger.info("Cleaning up...")
+
+        # Close environment first
+        try:
+            if 'env' in locals() and env is not None:
+                logger.info("Closing environment...")
+                env.close()
+        except Exception as env_close_error:
+            logger.error(f"Error closing environment: {env_close_error}")
+
+        # Close GUI
+        try:
+            if 'gui' in locals() and gui is not None:
+                logger.info("Closing GUI...")
+                gui.close()
+        except Exception as gui_close_error:
+            logger.error(f"Error closing GUI: {gui_close_error}")
+
+        # CLEANUP DOLPHIN INSTANCES
+        try:
+            # Comprehensive PID recovery for all cancellation scenarios
+            dolphin_pids = []
+
+            # Method 1 : If no PIDs yet, try reading from PID files
+            # At this stage, PIDs exist in temp files but may not be in allocation_result yet
+            # This handles early cancellation before PIDs were stored in allocation_result
+            if args.num_instances > 1:
+                logger.debug("Reading PIDs from temporary files...")
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+
+                for i in range(args.num_instances):
+                    pid_file = os.path.join(script_dir, f"dolphin_pid_{i}.tmp")
+                    try:
+                        if os.path.exists(pid_file):
+                            with open(pid_file, 'r') as f:
+                                pid_str = f.read().strip()
+                                if pid_str and pid_str != "-1":
+                                    pid = int(pid_str)
+                                    if pid > 0 and pid not in dolphin_pids:
+                                        dolphin_pids.append(pid)
+                                        logger.debug(f"Recovered PID {pid} from file {pid_file}")
+                            # Clean up PID file
+                            os.remove(pid_file)
+                            logger.debug(f"Removed PID file: {pid_file}")
+                    except Exception as pid_recovery_error:
+                        logger.debug(f"Could not recover PID from {pid_file}: {pid_recovery_error}")
+
+            # Fallbacks : Try allocation_result (may be empty at this stage)
+            if 'allocation_result' in locals() and allocation_result is not None:
+                pids_from_alloc = allocation_result.get('dolphin_pids', [])
+                if pids_from_alloc:
+                    dolphin_pids.extend(pids_from_alloc)
+                    logger.debug(f"Found {len(pids_from_alloc)} PIDs from allocation_result")
+
+            # Filter valid PIDs and remove duplicates
+            valid_pids = list(set([pid for pid in dolphin_pids if pid is not None and pid > 0]))
+
+            if valid_pids:
+                logger.warning(f"Closing {len(valid_pids)} Dolphin instance(s)...")
+                cleanup_dolphin_processes(valid_pids, emergency=False)
+
+                # Verify cleanup
+                import psutil
+                time.sleep(0.5)
+                still_running = [pid for pid in valid_pids if psutil.pid_exists(pid)]
+
+                if not still_running:
+                    logger.info("All Dolphin instances closed")
+                else:
+                    logger.warning(f"{len(still_running)} instance(s) still running")
+                    logger.warning("Please close them manually if needed")
+            else:
+                logger.debug("No Dolphin instances to cleanup")
+                logger.debug("If Dolphin windows are open, they may need manual closure")
+
+        except Exception as dolphin_cleanup_error:
+            logger.error(f"Error cleaning up Dolphin: {dolphin_cleanup_error}")
+            import traceback
+            traceback.print_exc()
+
+        logger.info("Cleanup complete")
+
+        # Mark cleanup done
+        _cleanup_done = True
+
         return
 
     try:
@@ -3441,21 +3888,105 @@ def main():
             logger.warning("Aucun agent à sauvegarder (erreur avant création)")
 
     finally:
+        # Mark cleanup as done to prevent atexit handler from running
         logger.info("Cleanup started...")
 
-        # PRIORITY 1: Close Dolphin instances FIRST (before env cleanup)
+        # Track if Dolphin instances were launched and cleanup status
+        had_dolphin_instances = False
+        dolphin_cleanup_successful = False
+
+        # PRIORITY 0: Stop frame capture reconnection attempts before closing Dolphin
+        #             to avoid log error spam
         try:
+            if 'env' in locals() and env is not None:
+                # Signal all frame captures to stop trying to reconnect
+                if hasattr(env, 'env_method'):
+                    # VecEnv case (multi-instance)
+                    try:
+                        frame_captures = env.env_method('get_frame_capture')
+                        shutdown_count = 0
+                        for fc in frame_captures:
+                            if fc and hasattr(fc, 'shutdown'):
+                                fc.shutdown()
+                                shutdown_count += 1
+                        if shutdown_count > 0:
+                            logger.debug(f"Signaled {shutdown_count} frame captures to stop reconnection")
+                    except (AttributeError, IndexError, TypeError) as fc_method_error:
+                        logger.debug(f"Could not call env_method for frame capture: {fc_method_error}")
+                elif hasattr(env, 'frame_capture'):
+                    # Single env case
+                    if hasattr(env.frame_capture, 'shutdown'):
+                        env.frame_capture.shutdown()
+                        logger.debug("Signaled single frame capture to stop reconnection")
+        except Exception as fc_shutdown_error:
+            logger.debug(f"Error signaling frame capture shutdown: {fc_shutdown_error}")
+
+        # PRIORITY 1: Close Dolphin instances (after stopping frame capture)
+        try:
+            # Check if allocation_result exists and has PIDs
             if 'allocation_result' in locals() and allocation_result is not None:
                 dolphin_pids = allocation_result.get('dolphin_pids', [])
-                if dolphin_pids:
-                    logger.warning("Closing Dolphin instances...")
-                    cleanup_dolphin_processes(dolphin_pids)
+
+                # Filter out None and invalid PIDs
+                valid_pids = [pid for pid in dolphin_pids if pid is not None and pid > 0]
+
+                if valid_pids:
+                    had_dolphin_instances = True
+                    logger.info(f"Closing {len(valid_pids)} Dolphin instance(s)...")
+
+                    # Call cleanup function
+                    cleanup_dolphin_processes(valid_pids, emergency=False)
+
+                    # Verify cleanup success by checking if processes still exist
+                    import psutil
+                    still_running = []
+                    for pid in valid_pids:
+                        try:
+                            if psutil.pid_exists(pid):
+                                still_running.append(pid)
+                        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError) as pid_check_error:
+                            # NoSuchProcess: Process terminated between check and access
+                            # AccessDenied: Insufficient permissions (shouldn't happen for pid_exists)
+                            # OSError: System-level error (rare)
+                            logger.debug(f"Could not verify PID {pid}: {pid_check_error}")
+                            pass
+
+                    if not still_running:
+                        dolphin_cleanup_successful = True
+                        logger.info("All Dolphin instances closed successfully")
+                    else:
+                        dolphin_cleanup_successful = False
+                        logger.warning(f"{len(still_running)} Dolphin instance(s) still running: {still_running}")
                 else:
-                    logger.debug("No Dolphin PIDs to cleanup")
+                    logger.debug("No valid Dolphin PIDs to cleanup")
+                    # No instances to clean = success by default
+                    dolphin_cleanup_successful = True
             else:
-                logger.debug("allocation_result not found or None")
+                logger.debug("allocation_result not found - no Dolphin instances launched")
+                # No allocation_result = single instance mode or no instances
+                dolphin_cleanup_successful = True
+
         except Exception as dolphin_cleanup_error:
             logger.error(f"Error cleaning up Dolphin: {dolphin_cleanup_error}")
+            import traceback
+            traceback.print_exc()
+            dolphin_cleanup_successful = False
+
+        # Warn user ONLY if:
+        # 1. Dolphin instances were actually launched (had_dolphin_instances = True)
+        # 2. AND cleanup failed (dolphin_cleanup_successful = False)
+        if had_dolphin_instances and not dolphin_cleanup_successful:
+            logger.error("")
+            logger.error("=" * 70)
+            logger.error("DOLPHIN CLEANUP FAILED")
+            logger.error("=" * 70)
+            logger.error("Some Dolphin instances may still be running")
+            logger.error("Please close them manually:")
+            logger.error("  1. Open Task Manager (Ctrl+Shift+Esc)")
+            logger.error("  2. Find 'Dolphin.exe' processes")
+            logger.error("  3. End task for each instance (sorry)")
+            logger.error("=" * 70)
+            logger.error("")
 
         # Stop input thread if GUI mode
         try:
@@ -3464,79 +3995,77 @@ def main():
 
             if 'input_thread' in locals() and input_thread is not None:
                 if input_thread.is_alive():
-                    logger.info("Attente fin du thread d'input...")
+                    logger.info("Waiting for input thread to finish...")
                     input_thread.join(timeout=1.0)
 
         except Exception as thread_cleanup_error:
-            training_logger.log_error(thread_cleanup_error, context="Nettoyage thread")
-            logger.error(f"Erreur nettoyage thread: {thread_cleanup_error}")
+            training_logger.log_error(thread_cleanup_error, context="Thread cleanup")
+            logger.error(f"Error cleaning up thread: {thread_cleanup_error}")
 
-        # Nettoyer le contrôleur en premier
+        # Clean up controller first
         try:
             if 'env' in locals():
                 controller = None
 
-                # Méthode 1 : Via get_attr (VecEnv)
+                # Method 1: Via get_attr (VecEnv)
                 if hasattr(env, 'get_attr'):
                     try:
                         controllers = env.get_attr('controller')
-                        # Déplier les listes imbriquées
+                        # Unfold nested lists
                         while isinstance(controllers, list) and len(controllers) > 0:
                             controllers = controllers[0]
                         controller = controllers
                     except (AttributeError, IndexError):
                         pass
 
-                # Méthode 2 : Accès direct (fallback)
+                # Method 2: Direct access (fallback)
                 if controller is None and hasattr(env, 'envs'):
                     try:
                         controller = env.envs[0].controller
                     except (AttributeError, IndexError):
                         pass
 
-                # Cleanup si trouvé
+                # Cleanup if found
                 if controller and hasattr(controller, 'cleanup'):
-                    logger.info("🎮 Nettoyage contrôleur...")
+                    logger.info("🎮 Cleaning up controller...")
                     controller.cleanup()
-                    logger.info("Contrôleur nettoyé")
+                    logger.info("Controller cleaned up")
                 else:
-                    logger.warning("Contrôleur non trouvé pour cleanup")
+                    logger.debug("Controller not found for cleanup")
 
         except Exception as cleanup_error:
-            training_logger.log_error(cleanup_error, context="Nettoyage contrôleur")
-            logger.error(f"Erreur nettoyage contrôleur : {cleanup_error}")
+            training_logger.log_error(cleanup_error, context="Controller cleanup")
+            logger.error(f"Error cleaning up controller: {cleanup_error}")
 
         except (AttributeError, IndexError, TypeError) as cleanup_error:
-            training_logger.log_error(cleanup_error, context="Nettoyage contrôleur")
-            logger.error(f"Impossible de nettoyer le contrôleur: {cleanup_error}")
+            training_logger.log_error(cleanup_error, context="Controller cleanup")
+            logger.error(f"Unable to clean up controller: {cleanup_error}")
 
-        # FERMER LE LOGGER
+        # CLOSE LOGGER
         try:
             if 'training_logger' in locals() and training_logger is not None:
                 training_logger.close()
         except Exception as logger_error:
-            # Ne pas logger dans training_logger car on est en train de le fermer
-            logger.error(f"Erreur fermeture logger: {logger_error}")
+            logger.error(f"Error closing logger: {logger_error}")
 
-        # FERMER L'ENVIRONNEMENT (suppression du double appel)
+        # CLOSE ENVIRONMENT
         try:
             if 'env' in locals() and env is not None:
-                logger.info("🌍 Fermeture environnement...")
+                logger.info("🌍 Closing environment...")
                 env.close()
         except Exception as env_error:
-            # Training_logger peut être déjà fermé ici, utiliser uniquement module logger
-            logger.error(f"Erreur fermeture env: {env_error}")
+            logger.error(f"Error closing env: {env_error}")
 
-        # FERMER LE GUI
+        # CLOSE GUI
         try:
             if 'gui' in locals() and gui is not None:
-                logger.warning("Fermeture interface...")
+                logger.warning("Closing interface...")
                 gui.close()
         except Exception as gui_error:
-            # Training_logger peut être déjà fermé ici, utiliser uniquement module logger
-            logger.error(f"Erreur fermeture GUI: {gui_error}")
+            logger.error(f"Error closing GUI: {gui_error}")
 
-        logger.warning("Terminé")
+        _cleanup_done = True
+        logger.warning("Terminated")
 
 # ============================================================
 # LANCER ENTRAINEMENT

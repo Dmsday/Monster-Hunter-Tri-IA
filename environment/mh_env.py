@@ -2029,30 +2029,28 @@ class MonsterHunterEnv(gym.Env):
             logger.warning(f"Instance {self.instance_id} : Contrôleur non initialisé")
             return None
 
+    def get_frame_capture(self):
+        """
+        Return the frame capture instance for cleanup purposes.
+        Used by train.py to signal shutdown before closing Dolphin.
+
+        Returns:
+            FrameCapture instance or None if vision disabled
+        """
+        if hasattr(self, 'frame_capture') and self.frame_capture is not None:
+            return self.frame_capture
+        return None
+
     def get_window_title(self) -> str:
         """
         Retourne le titre de la fenêtre capturée
-        Utilisé pour debug/vérification en multi-instance
-
-        Returns:
-            str: Titre de la fenêtre ou chaîne vide
-
-        Raises:
-        Aucune - retourne une chaîne vide en cas d'erreur
         """
         if self.frame_capture and self.frame_capture.hwnd:
             try:
                 import win32gui
                 return win32gui.GetWindowText(self.frame_capture.hwnd)
             except (OSError, AttributeError, ValueError) as get_window_title_error:
-                # OSError: Handle invalide ou fenêtre fermée
-                # AttributeError: Problème avec l'objet hwnd
-                # ValueError: Handle avec valeur invalide
                 logger.debug(f"Impossible d'obtenir le titre de la fenêtre: {get_window_title_error}")
-                return ""
-            except ImportError:
-                # win32gui non disponible (peu probable ici car import local)
-                logger.warning("Module win32gui non disponible")
                 return ""
         return ""
 

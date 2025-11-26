@@ -46,7 +46,7 @@ This project trains a Deep Reinforcement Learning agent to play **Monster Hunter
 - **Memory Reading**: Direct RAM access via Dolphin Memory Engine
 - **Virtual Controller**: Sends inputs using vgamepad (ViGEmBus)
 
-**⚠️ Note on Comments**: All code comments are currently in **French**, but I plan to translate them to English progressively. Feel free to ask questions or contribute translations!
+**⚠️ Note on Comments**: All (some now) code comments and log message are currently in **French**, but I plan to translate them to English progressively. Feel free to ask questions or contribute translations!
 
 ---
 

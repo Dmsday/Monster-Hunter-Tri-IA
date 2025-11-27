@@ -1,34 +1,35 @@
 """
-Capture de frames depuis la fenêtre Dolphin
-Priorité à la fenêtre avec "Monster Hunter" dans le titre
+Frame capture from the Dolphin window
+Priority given to the window with "Monster Hunter" in the title
 """
 
 # ============================================================================
-# IMPORTS STANDARD PYTHON
+# STANDARD PYTHON IMPORTS
 # ============================================================================
-import time                   # Gestion FPS et rate limiting
-import traceback              # Affichage détaillé des erreurs
-import ctypes                 # Pour appeler PrintWindow directement
+import time                   # FPS management and rate limiting
+import traceback              # Detailed display of errors
+import ctypes                 # To call PrintWindow directly
+import os                     # to retrieve the dolphin capture DLL
 
 # ============================================================================
-# TRAITEMENT D'IMAGES
+# IMAGE PROCESSING
 # ============================================================================
-import numpy as np            # Arrays pour stocker les images
-import cv2                    # OpenCV - Conversion couleurs (BGRA->RGB)
+import numpy as np            # Arrays to store images
+import cv2                    # OpenCV - Color conversion (BGRA->RGB)
 
 # ============================================================================
 # WIN32 API (WINDOWS)
 # ============================================================================
-import win32gui               # Manipulation fenêtres Windows
-import win32ui                # Interface utilisateur Win32
-import win32con               # Constantes Win32 (SRCCOPY, etc.)
-# Ces 3 modules permettent de :
-# - Trouver la fenêtre Dolphin (win32gui.EnumWindows)
-# - Capturer son contenu (BitBlt)
-# - Convertir en image exploitable
+import win32gui               # Windows os window manipulation
+import win32ui                # Win32 user interface
+import win32con               # Win32 constants (SRCCOPY, etc.)
+# These 3 modules allow you to:
+# - Find the Dolphin window (win32gui.EnumWindows)
+# - Capture its content (BitBlt)
+# - Convert it into a usable image
 
 # ============================================================================
-# MODULES PERSONNALISÉS
+# CUSTOM MODULES
 # ============================================================================
 # --- Logging ---
 from utils.module_logger import get_module_logger
@@ -87,7 +88,26 @@ class FrameCapture:
         if self.use_dll:
             try:
                 logger.info("Initializing DolphinCapture.dll...")
-                self.dll_wrapper = DolphinCaptureDLL()
+
+                # Try multiple DLL locations (project root, vision/, bin/)
+                dll_paths = [
+                    "DolphinCapture.dll",  # Project root
+                    "vision/DolphinCapture.dll",  # Vision folder
+                    "bin/DolphinCapture.dll",  # Bin folder
+                ]
+
+                dll_found = None
+                for dll_path in dll_paths:
+                    if os.path.exists(dll_path):
+                        dll_found = dll_path
+                        logger.debug(f"DLL found at: {dll_path}")
+                        break
+
+                if not dll_found:
+                    logger.warning(f"DLL not found in any location: {dll_paths}")
+                    raise FileNotFoundError("DolphinCapture.dll not found")
+
+                self.dll_wrapper = DolphinCaptureDLL(dll_path=dll_found)
 
                 # Create instance for this window
                 # Type: int | None (>= 0 on success, -1 on failure, None if error)

@@ -219,8 +219,17 @@ class MonsterHunterEnv(gym.Env):
                 # Force PrintWindow if rtvision active for stability
                 force_pw = self.rt_vision or self.rt_minimap
 
-                # MULTI-INSTANCE : Pass expected window title
-                expected_title = f"MHTri-{self.instance_id}" if self.instance_id >= 0 else None
+                # MULTI-INSTANCE : Pass expected window title ONLY if truly multi-instance
+                # In single-instance mode (instance_id=0 AND no --num-instances flag),
+                # let FrameCapture auto-detect any Dolphin window
+                if self.instance_id > 0:
+                    # Multi-instance mode: enforce strict window matching
+                    expected_title = f"MHTri-{self.instance_id}"
+                    logger.debug(f"Multi-instance mode: expecting window title '{expected_title}'")
+                else:
+                    # Single-instance mode: auto-detect (accept any MH Tri window)
+                    expected_title = None
+                    logger.debug("Single-instance mode: auto-detecting Dolphin window")
 
                 # Use DLL for robust capture (works even when window covered)
                 self.frame_capture = FrameCapture(
@@ -231,11 +240,23 @@ class MonsterHunterEnv(gym.Env):
                     use_dll=True  # Enable DLL capture (recommended)
                 )
 
+                # VERIFY CAPTURE IS WORKING
+                test_frame = self.frame_capture.capture_frame()
+                if test_frame is None or test_frame.size == 0:
+                    raise RuntimeError("Frame capture returned invalid frame (None or empty)")
+
+                # Check frame is not completely black (common error)
+                mean_brightness = test_frame.mean()
+                if mean_brightness < 5:
+                    raise RuntimeError(f"Frame capture returned black frame (brightness: {mean_brightness:.1f})")
+
                 # Log capture method
                 if hasattr(self.frame_capture, 'use_dll') and self.frame_capture.use_dll:
                     logger.info("Using DolphinCapture.dll (robust capture)")
                 else:
                     logger.warning("Using GDI fallback (less robust)")
+
+                logger.info(f"Test frame captured: {test_frame.shape}, brightness: {mean_brightness:.1f}")
 
                 self.preprocessor = FramePreprocessor(
                     target_size=frame_size,
@@ -243,12 +264,23 @@ class MonsterHunterEnv(gym.Env):
                     frame_stack=frame_stack,
                 )
 
-                logger.info("Vision initialisée")
+                logger.info("Vision initialized successfully")
 
             except Exception as vision_error:
-                logger.error(f"ERREUR vision: {vision_error}")
+                logger.error(f"CRITICAL: Vision initialization failed: {vision_error}")
+                logger.error(f"")
+                logger.error(f"📋 DIAGNOSTICS:")
+                logger.error(f"   1. Check Dolphin is running")
+                logger.error(f"   2. Check Monster Hunter Tri is loaded (not main menu)")
+                logger.error(f"   3. Check window title matches: MHTri-{self.instance_id}")
+                logger.error(f"   4. Check window is NOT minimized")
+                logger.error(f"")
+                logger.error(f"💡 FALLBACK: Training will continue with MEMORY ONLY")
+                logger.error(f"   Vision features (CNN) will NOT be available")
+                logger.error(f"   Agent will rely solely on memory features")
+                logger.error(f"")
+
                 self.use_vision = False
-                # Mettre à None si erreur
                 self.frame_capture = None
                 self.preprocessor = None
 
@@ -1045,16 +1077,34 @@ class MonsterHunterEnv(gym.Env):
         # MEMORY SEULE (cas rare, mais supporté)
         # ===================================================================
         elif self.use_memory and self.memory:
-            logger.debug("Mode memory seule (pas de vision)")
+            # Log ONCE on first call, then silent
+            if not hasattr(self, '_memory_only_mode_logged'):
+                logger.warning("MEMORY-ONLY MODE ACTIVE")
+                logger.warning("   Vision disabled, using memory features only (70 values)")
+                logger.warning("   Expected observation keys: ['memory']")
+                self._memory_only_mode_logged = True
+
             try:
                 raw_memory = self.memory.read_game_state()
                 memory_vector = self._create_enhanced_memory_vector(raw_memory)
                 observation['memory'] = memory_vector
 
-                logger.debug(f"Observation memory seule creee: {observation.keys()}")
+                # DEBUG logs only every 1000 steps (not every step)
+                if self.total_steps % 1000 == 0:
+                    logger.debug(f"Memory-only observation at step {self.total_steps}")
+                    logger.debug(f"   Keys: {list(observation.keys())}, Shape: {memory_vector.shape}")
+
+                # VERIFY COMPLETENESS
+                expected_keys = set(self.observation_space.spaces.keys())
+                actual_keys = set(observation.keys())
+                missing_keys = expected_keys - actual_keys
+
+                if missing_keys:
+                    logger.warning(f"Missing keys in memory-only mode: {missing_keys}")
+                    logger.warning(f"This might cause issues with the policy network")
 
             except Exception as read_memory_when_memory_only_error:
-                logger.error(f"Erreur lecture memoire: {read_memory_when_memory_only_error}")
+                logger.error(f"Error reading memory: {read_memory_when_memory_only_error}")
                 import traceback
                 traceback.print_exc()
                 return self._get_dummy_observation()
@@ -1117,32 +1167,54 @@ class MonsterHunterEnv(gym.Env):
                     logger.error(f"NaN/Inf détecté dans '{key}'")
                     observation[key] = np.nan_to_num(obs_value, nan=0.0, posinf=1.0, neginf=-1.0)
 
-        # Vérification périodique
+        # Periodic verification
         if self.total_steps % 1000 == 0:
-            logger.debug(f"Observation créée avec clés: {list(observation.keys())}")
-            self._save_observation_visualization(observation)
+            logger.debug(f"Observation created with keys: {list(observation.keys())}")
+
+            # ONLY attempt visualization if vision is actually enabled
+            if self.use_vision:
+                try:
+                    self._save_observation_visualization(observation)
+                except KeyError as viz_key_error:
+                    logger.warning(f"Visualization ignored (missing key): {viz_key_error}")
+            else:
+                logger.debug("Visualization ignored (use_vision=False)")
 
         return observation
 
     def _save_observation_visualization(self, observation: Dict):
         """
-        Sauvegarde une visualisation de ce que voit l'IA
+        Saves a visualization of what the AI sees
 
-        Crée une image composite montrant :
-        - Visual (première frame du stack)
-        - Exploration map (3 premiers channels)
-        - Stats mémoire importantes
+        Creates a composite image showing:
+            - Visual (first frame of the stack)
+            - Exploration map (first 3 channels)
+            - Few memory stats
 
-        Sauvegarde : ./debug/ai_vision_step_{total_steps}.png
+        Sauvegarde : ./vision/debug/ai_vision_step_{total_steps}.png
+
+        This method should ONLY be called when use_vision=True
         """
         try:
-            # VALIDATION : Vérifier que les clés nécessaires existent
+            # STRICT VALIDATION: All keys must be present for visualization
             required_keys = ['visual', 'memory', 'exploration_map']
             missing_keys = [k for k in required_keys if k not in observation]
 
             if missing_keys:
-                logger.warning(f"Visualisation impossible, cles manquantes: {missing_keys}")
+                logger.error(f"Cannot create visualization - missing required keys: {missing_keys}")
+                logger.error(f"   Available keys: {list(observation.keys())}")
+                logger.error(f"   This method should only be called when use_vision=True")
                 return
+
+            # Verify shapes are valid before proceeding
+            visual_shape = observation['visual'].shape
+            memory_shape = observation['memory'].shape
+            map_shape = observation['exploration_map'].shape
+
+            logger.debug(f"Creating visualization with:")
+            logger.debug(f"   Visual: {visual_shape}")
+            logger.debug(f"   Memory: {memory_shape}")
+            logger.debug(f"   Map: {map_shape}")
 
             # Créer figure avec subplots
             fig, axes = plt.subplots(2, 3, figsize=(15, 10))
@@ -1264,7 +1336,7 @@ class MonsterHunterEnv(gym.Env):
             plt.savefig(filepath, dpi=100, bbox_inches='tight')
             plt.close(fig)
 
-            logger.debug(f"📸 AI vision visualization saved: {filepath}")
+            logger.debug(f"AI vision visualization saved: {filepath}")
 
         except Exception as viz_error:
             logger.error(f"Erreur visualisation : {viz_error}")
@@ -1691,14 +1763,18 @@ class MonsterHunterEnv(gym.Env):
                     hp_delta = prev_hp - current_hp
                     if 0 < hp_delta < 100:
                         took_damage = True
-                        # Store damage for combat summary (don't spam logs every hit)
-                        if not hasattr(self, '_combat_damage_accumulated'):
-                            self._combat_damage_accumulated = 0
-                        self._combat_damage_accumulated += hp_delta
 
-                        # Log every 50 HP lost (midlife)
-                        if self._combat_damage_accumulated % 50 < hp_delta:
-                            logger.debug(f"🩸 Combat damage: {self._combat_damage_accumulated} HP total")
+                        # Initialize accumulator in reward_calc if doesn't exist
+                        if not hasattr(self.reward_calc, '_combat_damage_accumulated'):
+                            self.reward_calc._combat_damage_accumulated = 0
+
+                        # Store damage for combat summary
+                        self.reward_calc._combat_damage_accumulated += hp_delta
+
+                        # Log every ~30 HP lost for visibility during combat
+                        # Use modulo to avoid logging every single hit
+                        if self.reward_calc._combat_damage_accumulated % 30 < hp_delta:
+                            logger.info(f"🩸 Combat damage: {self.reward_calc._combat_damage_accumulated} HP accumulated")
 
                 # Calcul reward
                 if self.reward_calc:
@@ -1951,24 +2027,44 @@ class MonsterHunterEnv(gym.Env):
         return info_dict
 
     def _get_dummy_observation(self):
-        """Crée une observation dummy"""
+        """
+        Create dummy observation matching observation_space structure
+
+        IMPORTANT: This is used as fallback when real observation fails.
+        Must match exactly the structure defined in observation_space.
+        """
         if isinstance(self.observation_space, spaces.Dict):
             dummy_obs = {}
 
             if 'visual' in self.observation_space.spaces:
                 visual_shape = self.observation_space['visual'].shape
                 dummy_obs['visual'] = np.zeros(visual_shape, dtype=np.float32)
+                logger.debug(f"   Created dummy 'visual': {visual_shape}")
 
             if 'memory' in self.observation_space.spaces:
                 memory_shape = self.observation_space['memory'].shape
                 dummy_obs['memory'] = np.zeros(memory_shape, dtype=np.float32)
+                logger.debug(f"   Created dummy 'memory': {memory_shape}")
 
             if 'exploration_map' in self.observation_space.spaces:
                 map_shape = self.observation_space['exploration_map'].shape
                 dummy_obs['exploration_map'] = np.zeros(map_shape, dtype=np.float32)
+                logger.debug(f"   Created dummy 'exploration_map': {map_shape}")
 
-            # DEBUG
-            logger.debug(f"🔍 DEBUG _get_dummy_observation() - Clés créées: {list(dummy_obs.keys())}")
+            # VERIFY COMPLETENESS
+            expected_keys = set(self.observation_space.spaces.keys())
+            actual_keys = set(dummy_obs.keys())
+
+            if expected_keys != actual_keys:
+                missing = expected_keys - actual_keys
+                extra = actual_keys - expected_keys
+                logger.error(f"Dummy observation structure mismatch!")
+                if missing:
+                    logger.error(f"   Missing keys: {missing}")
+                if extra:
+                    logger.error(f"   Extra keys: {extra}")
+            else:
+                logger.debug(f"Dummy observation complete with keys: {list(dummy_obs.keys())}")
 
             return dummy_obs
         else:

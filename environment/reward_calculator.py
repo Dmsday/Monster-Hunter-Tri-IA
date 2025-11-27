@@ -376,12 +376,12 @@ class MonsterHunterRewardCalculator:
             # Reset compteur de frames
             self.frames_in_monster_zone = 0
 
-        # 3. BONUS SI ON ENTRE EN ZONE AVEC MONSTRES
-        # Condition : transition False → True ET ce n'est PAS un changement de zone
+        # 3. BONUS IF YOU ENTER A MONSTER ZONE
+        # Condition: transition False → True AND it's NOT a zone change
         elif not self.prev_zone_had_monsters and self.zone_has_monsters and not zone_just_changed:
             self.frames_in_monster_zone = 0
             info['entered_monster_zone'] = True
-            logger.debug(f"ENTRÉE EN ZONE AVEC MONSTRES ! ({monster_count} monstres détectés)")
+            logger.info(f"ENTERED MONSTER ZONE! ({monster_count} monsters detected)")
 
         # Sauvegarder pour le prochain step
         self.prev_zone_had_monsters = self.zone_has_monsters
@@ -760,18 +760,34 @@ class MonsterHunterRewardCalculator:
 
         self._last_monster_count = monster_count_now
 
-        # 1. Calculer time_since_damage AVANT toute modification de last_damage_time
-        # Vérifier si last_damage_time a été initialisé (> 0)
+        # 1. Calculate time_since_damage BEFORE modifying last_damage_time
+        # Check if last_damage_time has been initialized (> 0)
         if self.last_damage_time > 0:
             time_since_damage = current_time - self.last_damage_time
         else:
-            time_since_damage = float('inf')  # Jamais de dégât = infini
+            # Never took damage = timeout already expired (force out of combat)
+            time_since_damage = self.combat_timeout + 1.0  # 11s = beyond timeout
 
-        # 2. Déterminer in_combat
+        # 2. Determine in_combat state
         if zone_just_changed:
-            # Reset complet si changement de zone
+            # LOG COMBAT SUMMARY BEFORE RESET (if was in combat)
+            if self.prev_in_combat and self.last_damage_time > 0:
+                # Calculate time since last damage for the summary
+                time_in_combat = current_time - self.last_damage_time
+
+                # Log combat summary with accumulated damage
+                if hasattr(self, '_combat_damage_accumulated') and self._combat_damage_accumulated > 0:
+                    logger.info(f"🏁 COMBAT ENDED (zone change {self.prev_zone} → {current_zone})")
+                    logger.info(f"   Total damage taken: {self._combat_damage_accumulated} HP")
+                    logger.info(f"   Monsters hit: {self.monsters_hit_count}")
+                    logger.info(f"   Combat duration: {time_in_combat:.1f}s")
+                    # Reset accumulated damage AFTER logging
+                    self._combat_damage_accumulated = 0
+                    info['combat_ended'] = True
+
+            # Complete reset on zone change
             in_combat = False
-            logger.info(f"Changement zone {self.prev_zone} → {current_zone} : Reset état combat")
+            self.last_damage_time = 0.0  # Reset timestamp
 
         elif took_damage:
             # Just took damage = combat active
@@ -782,61 +798,83 @@ class MonsterHunterRewardCalculator:
             # Log only on transition False → True (combat start)
             if not was_in_combat:
                 info['combat_started'] = True
-                logger.info(f"COMBAT STARTED (Zone {current_zone})")
-                logger.info(f"Monsters present: {monster_count_now}")
-                logger.debug(f"First damage taken: {self._combat_damage_accumulated} HP")
+                logger.info(f"⚔️ COMBAT STARTED (Zone {current_zone})")
+                logger.info(f"   Monsters present: {monster_count_now}")
 
         elif time_since_damage < self.combat_timeout:
-            # Moins de 10s depuis dernier dégât = combat toujours actif
+            # Less than 10 seconds since last damage = combat still active
             in_combat = True
 
         else:
             # More than 10s without damage = combat ended
+            was_in_combat = self.prev_in_combat  # Save previous state
             in_combat = False
-            if self.last_damage_time > 0:  # Avoid log at startup
+
+            # Log ONLY on transition True → False (combat end)
+            if was_in_combat and self.last_damage_time > 0:
                 info['combat_ended'] = True
 
-                # Log combat summary with accumulated damage
-                if hasattr(self, '_combat_damage_accumulated') and self._combat_damage_accumulated > 0:
-                    logger.info(f"COMBAT ENDED (timeout: {time_since_damage:.1f}s)")
-                    logger.info(f"Total damage taken: {self._combat_damage_accumulated} HP")
-                    logger.info(f"Monsters hit: {self.monsters_hit_count}")
-                    # Reset accumulated damage
-                    self._combat_damage_accumulated = 0
-                else:
-                    logger.debug(f"Combat ended (timeout: {time_since_damage:.1f}s)")
-            self.last_damage_time = 0.0
+                # ALWAYS log combat summary on end (even if no damage recorded)
+                logger.info(f"COMBAT ENDED (timeout: {time_since_damage:.1f}s)")
 
-        # DEBUG : Logger l'état AVANT le calcul
+                # Log accumulated damage if any
+                damage_taken = getattr(self, '_combat_damage_accumulated', 0)
+                if damage_taken > 0:
+                    logger.info(f"💔 Total damage taken: {damage_taken} HP")
+                else:
+                    logger.info(f"💚 No damage taken during this combat")
+
+                # Log hits given
+                logger.info(f"Monsters hit: {self.monsters_hit_count} times")
+
+                # Log combat duration
+                combat_duration = current_time - (self.last_damage_time - self.combat_timeout)
+                if combat_duration > 0:
+                    logger.info(f"Combat duration: {combat_duration:.1f}s")
+
+                # Reset accumulated damage AFTER logging
+                self._combat_damage_accumulated = 0
+
+            # Reset timestamp
+            if in_combat != was_in_combat:  # Only reset on actual transition
+                self.last_damage_time = 0.0
+
+        # DEBUG : Log combat state periodically (every 300 steps)
         total_steps = info.get('total_steps', 0)
         if total_steps > 0 and total_steps % 300 == 0:
-            logger.debug(f"🔍 État combat (step {total_steps}):")
+            logger.debug(f"🔍 Combat state (step {total_steps}):")
             logger.debug(f"   took_damage={took_damage}")
             logger.debug(f"   in_combat={in_combat}")
+            logger.debug(f"   prev_in_combat={self.prev_in_combat}")
             logger.debug(f"   last_damage_time={self.last_damage_time:.1f}s")
             logger.debug(f"   time_since_damage={time_since_damage:.1f}s")
             logger.debug(f"   zone_has_monsters={self.zone_has_monsters}")
             logger.debug(f"   monsters_present_now={monsters_present_now}")
             logger.debug(f"   monster_count={self._last_monster_count}")
+            if hasattr(self, '_combat_damage_accumulated'):
+                logger.debug(f"   damage_accumulated={self._combat_damage_accumulated} HP")
 
-        # Si zone avec monstres MAIS aucun dégât depuis 15s → Ignorer
-        # Règles :
-        # 1. Activation si dégâts pris
-        # 2. Désactivation si timeout 15s ET last_damage_time valide
-        # 3. Une fois activé, rester actif jusqu'au timeout
-        # 4. Ignorer monsters_present_now une fois activé
+        # If zone with monsters BUT no damage for 15s → Ignore
+        # Rules:
+        # 1. Activate if damage is taken
+        # 2. Deactivate if 15s timeout AND last_damage_time is valid
+        # 3. Once activated, remain active until the timeout
+        # 4. Ignore monsters_present_now once activated
 
         if took_damage:
             # ACTIVATION : Dégâts pris = zone confirmée
-            if not self.zone_has_monsters:
-                logger.debug(f"ENTRÉE EN ZONE AVEC MONSTRES ! ({monster_count_now} monstres détectés)")
+            was_in_monster_zone = self.zone_has_monsters
             self.zone_has_monsters = True
+
+            # Log only on transition (avoid spam)
+            if not was_in_monster_zone and monster_count_now > 0:
+                logger.debug(f"CONFIRMED MONSTER ZONE (took damage, {monster_count_now} monsters)")
 
         elif self.zone_has_monsters:
             # Zone déjà activée : vérifier timeout
             # Condition : last_damage_time valide (> 0) ET timeout dépassé
             if self.last_damage_time > 0 and time_since_damage > 15.0:
-                logger.info(f"🚫 Zone monstre DÉSACTIVÉE (pas de dégâts depuis {time_since_damage:.1f}s)")
+                logger.debug(f"Zone monstre DÉSACTIVÉE (pas de dégâts depuis {time_since_damage:.1f}s)")
                 self.zone_has_monsters = False
                 info['monster_zone_ignored_no_combat'] = True
             # Sinon : rester actif (ne pas suivre monsters_present_now)
@@ -861,37 +899,18 @@ class MonsterHunterRewardCalculator:
         info['in_monster_zone'] = self.zone_has_monsters
         info['in_combat'] = in_combat
 
-        # DEBUG : Logger UNIQUEMENT les changements d'état combat
-        if in_combat != self.prev_in_combat:
-            if in_combat:
-                logger.debug(f"DÉBUT COMBAT détecté (Zone {current_zone})")
-                logger.debug(f"Monstres présents: {monster_count_now}")
-                logger.debug(f"Temps depuis dernier dégât: {time_since_damage:.1f}s")
-            else:
-                logger.debug(f"FIN COMBAT (Zone {current_zone})")
-                if self.zone_has_monsters:
-                    logger.debug(f"Raison : Timeout ({time_since_damage:.1f}s sans dégât)")
-                elif current_zone == 0:
-                    logger.debug(f"Raison : Retour au camp")
-                else:
-                    logger.debug(f"Raison : Plus de monstres détectés")
-
-            self.prev_in_combat = in_combat  # Sauvegarder nouvel état
-
-        # Log périodique pour debug
-        if not hasattr(self, '_combat_log_count') or self._combat_log_count is None:
-            self._combat_log_count += 0
-        else:
-            self._combat_log_count = 1
-
-        # Forcer "en combat" sur false si dans le camp (zone 0)
+        # Force combat state to False in camp (zone 0)
+        # Camp is a safe zone, no combat possible
         if current_zone == 0:
             in_combat = False
 
-        # Ajouter aux infos
+        # Add to info
         info['in_combat'] = in_combat
 
-        # CONDITIONNER TOUTES LES ACTIONS AU COMBAT
+        self.prev_in_combat = in_combat
+
+        # 5. ACTIONS (attack, block, dodge)
+        # CONDITION ALL ACTIONS ON COMBAT
         if action in [9, 12] and self.zone_has_monsters:  # Attaque
             if monster_hit_reward > 0:
                 attack_success_bonus = 0.4 * (2.0 if in_combat else 1.0)
@@ -900,14 +919,14 @@ class MonsterHunterRewardCalculator:
                 self.reward_breakdown_detailed['hit.hit_success'] = attack_success_bonus
                 info['attack_success'] = True
             else:
-                # Donner reward SEULEMENT si en combat actif
+                # Give rewards ONLY if in active combat
                 if in_combat:
                     attack_reward = self.BONUS_ATTACK_ATTEMPT * 2.0
                     reward += attack_reward
                     self.reward_breakdown['defensive_actions'] += attack_reward
                     self.reward_breakdown_detailed['defensive_actions.attack_attempt'] = attack_reward
                     info['attack_attempt'] = True
-                # SINON : Aucune reward (pas de monstres ou pas en combat)
+                # OTHERWISE : No reward (no monsters or no combat)
 
         elif action == 10 and in_combat and self.zone_has_monsters: # Bloc
             block_bonus = self.BONUS_BLOCK_ATTEMPT

@@ -1,199 +1,65 @@
 """
 ═══════════════════════════════════════════════════════════════════════════════
-            MONSTER HUNTER TRI - INTERFACE GRAPHIQUE DE L'ENTRAÎNEMENT
+                MONSTER HUNTER TRI – TRAINING GUI OVERVIEW
 ═══════════════════════════════════════════════════════════════════════════════
 
 MODULE: training_gui.py
 VERSION: 3.0
-AUTEUR: DR.
-DATE: 05/11/2025
+AUTHOR: DR.
+DATE: 2025-11-05
 
-DESCRIPTION:
-    Interface graphique multi-fenêtres pour visualiser l'entraînement de l'IA
-    jouant à Monster Hunter Tri via Dolphin Emulator. Affiche en temps réel :
+DESCRIPTION :
+    Multi-window GUI to monitor AI training in Monster Hunter Tri (Dolphin).
+    Live display of:
+        • Core stats (HP, stamina, reward, zone…)
+        • Episode graphs (reward, length, hits)
+        • 3D exploration map with markers
+        • Player data (position, inventory, orientation)
+        • Reward breakdown
+        • Zone statistics (monsters, HP, exploration)
 
-    • Statistiques principales (HP, stamina, reward, zone, etc.)
-    • Graphiques d'évolution (reward, longueur d'épisode, hits)
-    • Carte 3D d'exploration avec cubes et marqueurs
-    • Détails du joueur (position, inventaire, orientation)
-    • Breakdown détaillé des rewards par catégorie
-    • Statistiques par zone (monstres, HP, exploration)
+WINDOW STRUCTURE :
+    Main window: Stats panel + 3 matplotlib plots
+        Additional windows (collapsible):
+            • Player window (XYZ, orientation, inventory)
+            • Rewards window (categories, top gains/losses)
+            • Map window (3D map + tooltips)
 
-ARCHITECTURE:
+KEY FEATURES:
+    • Runs in a separate, non-blocking thread
+    • Auto-save window positions/sizes (gui_config.json)
+    • Interactive 3D map (colored cubes, markers, auto-zoom)
+    • Rolling averages for rewards (10s / 300 steps)
+    • Zone monster detection + exploration tracking
 
-    ┌─────────────────────────────────────────────────────────────┐
-    │                    FENÊTRE PRINCIPALE                       │
-    │  ┌───────────────┐  ┌──────────────────────────────────┐    │
-    │  │  STATS PANEL  │  │      GRAPHIQUES MATPLOTLIB       │    │
-    │  │   (gauche)    │  │         (3 subplots)             │    │
-    │  │               │  │  • Reward par épisode            │    │
-    │  │ • Episode     │  │  • Longueur épisode              │    │
-    │  │ • Steps       │  │  • Hits par épisode              │    │
-    │  │ • Reward      │  │                                  │    │
-    │  │ • HP/Stamina  │  │  (avec moyennes mobiles)         │    │
-    │  │ • Zone        │  │                                  │    │
-    │  │               │  │                                  │    │
-    │  │ [Boutons]     │  │                                  │    │
-    │  └───────────────┘  └──────────────────────────────────┘    │
-    └─────────────────────────────────────────────────────────────┘
-              │                    │                    │
-              ▼                    ▼                    ▼
-    ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
-    │  PLAYER WINDOW   │  │  REWARDS WINDOW  │  │   MAP WINDOW     │
-    │  (dépliable)     │  │   (dépliable)    │  │   (dépliable)    │
-    │                  │  │                  │  │                  │
-    │ • Position XYZ   │  │ • Breakdown      │  │ • Carte 3D       │
-    │ • Orientation    │  │ • Top 3 gains    │  │ • Cubes colorés  │
-    │ • Inventaire     │  │ • Top 3 pertes   │  │ • Marqueurs      │
-    │ • Distance       │  │ • Sous-catég.    │  │ • Tooltips       │
-    └──────────────────┘  └──────────────────┘  └──────────────────┘
+DEPENDENCIES:
+    tkinter, matplotlib, numpy, threading, json, deque
 
-FONCTIONNALITÉS CLÉS:
+TYPE CHECKER FALSE POSITIVES (SHORT EXPLANATION):
+    Several `# type: ignore` markers are intentional due to known stub issues:
 
-    1. Thread séparé (non-bloquant)
-       → L'interface tourne indépendamment de l'entraînement
-       → Mises à jour toutes les 500ms via after()
+    1) tkinter.pack(side=…, fill=…)
+       → tk.LEFT, tk.RIGHT, etc. *are strings*, but type checkers still warn.
 
-    2. Persistance de la configuration
-       → Sauvegarde automatique des positions/tailles de fenêtres
-       → Réouverture des fenêtres dépliables au démarrage
-       → Fichier: gui_config.json
+    2) tkinter.after(func)
+       → after() accepts callables without args, but stubs expect *args.
 
-    3. Carte 3D interactive
-       → Visualisation des cubes explorés avec Matplotlib 3D
-       → Couleurs selon nombre de visites (gris → bleu → vert → jaune → rouge)
-       → Marqueurs dynamiques (eau, monstres, transitions, obstacles)
-       → Tooltips informatifs au survol
-       → Zoom auto centré sur le joueur
-       → Position et orientation du joueur en temps réel
-
-    4. Breakdown détaillé des rewards
-       → Moyennes sur 10 secondes (300 steps)
-       → Catégories principales et sous-catégories dépliables
-       → Top 3 gains/pertes
-
-    5. Statistiques par zone
-       → Monstres présents et HP individuels (détection automatique)
-       → Exploration (cubes découverts, visites)
-       → Sortie de zone monstre tracking
-
-DÉPENDANCES:
-
-    • tkinter: Interface graphique (natif Python)
-    • matplotlib: Graphiques et carte 3D
-    • numpy: Calculs (moyennes, distances)
-    • threading: GUI non-bloquante
-    • json: Sauvegarde configuration
-    • collections.deque: Historiques à taille fixe
-
-
-    AVERTISSEMENT - FAUX POSITIFS DES TYPE CHECKERS :
-
-    Ce fichier contient de nombreux commentaires '# type: ignore' pour deux
-    catégories de faux positifs générés par les type checkers (PyCharm,
-    Pylance, mypy).
-
-    ═══════════════════════════════════════════════════════════════════════
-    1. FAUX POSITIF: tkinter.pack() avec side= et fill=
-    ═══════════════════════════════════════════════════════════════════════
-
-    SYMPTÔME:
-        Expected type 'Literal["left", "right", "top", "bottom"]', got 'str' instead
-
-    EXPLICATION TECHNIQUE:
-
-    Tkinter définit des constantes comme tk.LEFT, tk.RIGHT, tk.TOP, tk.BOTTOM.
-    Ces constantes sont en réalité des STRINGS ("left", "right", etc.) définies
-    dans le module tkinter:
-
-        # Dans tkinter/__init__.py
-        LEFT = 'left'
-        RIGHT = 'right'
-        TOP = 'top'
-        BOTTOM = 'bottom'
-
-    Le type checker ne "comprend" pas que tk.LEFT est exactement égal à "left",
-    et génère un warning car il s'attend au Literal mais reçoit techniquement
-    un 'str' (même si la valeur est identique).
-
-    POURQUOI NE PAS UTILISER DES STRINGS DIRECTEMENT ?
-
-    1. Convention Python/Tkinter : utiliser les constantes (tk.LEFT) est la
-       pratique recommandée et améliore la lisibilité du code
-
-    2. Autocomplete : les IDE proposent tk.LEFT automatiquement
-
-    3. Évite les typos : "leftt" ne générera pas d'erreur, tk.LEFTT si
-
-    EXEMPLE DE CODE CONCERNÉ:
-        frame.pack(side=tk.LEFT, fill=tk.BOTH)  # type: ignore
-
-    ═══════════════════════════════════════════════════════════════════════
-    2. FAUX POSITIF: tkinter.after() avec callable sans arguments
-    ═══════════════════════════════════════════════════════════════════════
-
-    SYMPTÔME:
-        Parameter 'args' unfilled, expected '*tuple[]'
-
-    EXPLICATION TECHNIQUE:
-
-    La signature de tkinter.after() dans les stubs de types est définie comme:
-
-        def after(self, ms: int, func: Callable[..., Any] = None, *args) -> str
-
-    Le type checker voit que func peut recevoir *args, et pense donc que vous
-    DEVEZ potentiellement fournir des arguments. Cependant, *args est optionnel
-    et Tkinter accepte parfaitement un callable sans arguments.
-
-    Le warning est généré car le type checker ne peut pas garantir que la
-    méthode passée (ex: self._open_player_window) ne nécessite pas d'arguments,
-    même si dans notre cas c'est bien le cas.
-
-    POURQUOI C'EST UN FAUX POSITIF ?
-
-    1. Les méthodes appelées (_open_player_window, _open_rewards_window, etc.)
-       ne prennent AUCUN paramètre obligatoire
-
-    2. tkinter.after() fonctionne parfaitement avec des callables sans args
-
-    3. Le code s'exécute correctement sans aucun problème
-
-    EXEMPLE DE CODE CONCERNÉ:
-        self.window.after(500, self._open_player_window)  # type: ignore
-
-    ═══════════════════════════════════════════════════════════════════════
-    SOLUTION RETENUE POUR LES DEUX CAS:
-    ═══════════════════════════════════════════════════════════════════════
-
-    Ajout de # type: ignore sur chaque ligne concernée pour supprimer les
-    warnings sans compromettre la qualité du code. Ces warnings sont purement
-    cosmétiques et n'indiquent aucun bug réel.
-
-    ALTERNATIVES TESTÉES ET REJETÉES:
-
-    • Utiliser lambda: lambda: method() → Ne résout pas le warning
-    • Utiliser functools.partial() → Ne résout pas le warning
-    • Créer des wrapper methods → Ajoute du code inutile pour un faux positif
-    • Caster explicitement les types → Impossible avec les constantes tkinter
-
+    Both cases run correctly; ignores suppress cosmetic warnings only.
 
 THREAD SAFETY:
+    • GUI runs in daemon thread
+    • Updates done via after() (Tk-safe)
+    • Config save protected against TclError
+    • winfo_exists() checks before updating widgets
 
-    • GUI tourne dans un thread séparé (daemon=True)
-    • Mise à jour via after() (thread-safe pour Tkinter)
-    • Sauvegarde config protégée contre TclError lors de la fermeture
-    • Widgets vérifiés avec winfo_exists() avant modification
+PERFORMANCE:
+    • Graphs updated every 500 ms
+    • 3D map reduces cube count (radius 2500)
+    • Bounded history (100 episodes, 300 rewards)
+    • Uses non-interactive Matplotlib backend ("Agg")
 
-PERFORMANCES:
-
-    • Graphiques mis à jour toutes les 500ms uniquement
-    • Carte 3D filtrée (environ 40 cubes proches du joueur, rayon 2500 unités)
-    • Historiques limités (100 épisodes pour graphiques, 300 pour rewards)
-    • Backend matplotlib non-interactif ('Agg') pour éviter conflits threads
-
-FICHIERS GÉNÉRÉS:
-
-    • gui_config.json: Configuration (positions fenêtres, états ouverts/fermés)
+GENERATED FILES:
+    • gui_config.json — window layout persistence
 
 ═══════════════════════════════════════════════════════════════════════════════
 """
@@ -239,10 +105,23 @@ class TrainingGUI:
     def __init__(self, title="Monster Hunter IA - Entraînement"):
         self.title = title
         self.window = None
-        self.config_file = "gui_config.json"
+        # New config location
+        config_dir = os.path.join(".", "config", "user")
+        os.makedirs(config_dir, exist_ok=True)
+        self.config_file = os.path.join(config_dir, "gui_config.json")
+
+        # Migrate old config if exists in project root
+        old_config = "gui_config.json"
+        if os.path.exists(old_config) and not os.path.exists(self.config_file):
+            import shutil
+            logger.warning(f"GUI config detected in root project")
+            shutil.move(old_config, self.config_file)
+            logger.warning(f"Migrated GUI config to {self.config_file}")
+
         self.config = self._load_config()
         self.running = False
         self.stop_requested = False
+        self._closing = False
 
         # Données
         self.current_stats = {
@@ -381,15 +260,19 @@ class TrainingGUI:
 
     def _save_config(self):
         """
-        Sauvegarde la config (thread-safe)
+        Save config (thread-safe with shutdown protection)
         """
+        # Don't save during shutdown - window may be partially destroyed
+        if self._closing:
+            logger.debug("Skipping config save during shutdown")
+            return
+
         try:
-            # Récupérer géométries actuelles SEULEMENT si fenêtre valide
+            # Get current geometries ONLY if window valid
             try:
                 if self.window and self.window.winfo_exists():
                     self.config['main_window']['geometry'] = self.window.geometry()
             except tk.TclError:
-                # Fenêtre déjà détruite, ignorer
                 pass
 
             try:
@@ -2217,76 +2100,119 @@ class TrainingGUI:
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
     def _schedule_update(self):
-        """Schedule la prochaine mise à jour"""
-        if self.running:
+        """
+        Schedule next update (stops immediately if closing)
+        """
+        # Check _closing flag FIRST to stop recursion during shutdown
+        if self._closing or not self.running:
+            logger.debug("GUI update loop stopped (closing or not running)")
+            return
+
+        # Check window exists before any operations
+        if not self.window or not self.window.winfo_exists():
+            logger.debug("GUI window destroyed, stopping updates")
+            self.running = False
+            return
+
+        try:
             self._update_display()
 
-            # Mettre à jour zone stats si ouverte
+            # Update zone stats if open
             if self.zone_stats_window and self.zone_stats_window.winfo_exists():
-                if self.current_stats.get('total_steps', 0) % 5 == 0: # Mise à jour toutes les 500ms
+                if self.current_stats.get('total_steps', 0) % 5 == 0:
                     self._update_zone_stats_window()
 
-            self.window.after(300, self._schedule_update) # Rafraichissement des fenetres du GUI (300ms)
+            # Schedule next update ONLY if still running and not closing
+            if self.running and not self._closing and self.window and self.window.winfo_exists():
+                self.window.after(300, self._schedule_update) # refresh every 300ms
+
+        except tk.TclError as schedule_error:
+            # Window destroyed during update - stop cleanly
+            logger.debug(f"TclError during update (window closed): {schedule_error}")
+            self.running = False
 
     def _update_display(self):
-        """Met à jour l'affichage"""
-        # mise à jour indicateur menu
-        is_menu_open = self.current_stats.get('in_game_menu', False)
-        if hasattr(self, 'menu_status_indicator'):
-            if is_menu_open:
-                self.menu_status_indicator.config(text="OUI", fg="#e67e22")
-            else:
-                self.menu_status_indicator.config(text="NON", fg="#95a5a6")
+        """
+        Updates display
+        """
+        # Stop immediately if closing
+        if self._closing or not self.running:
+            return
 
-        # Boucle
-        for key, label in self.stat_labels.items():
-            value = self.current_stats.get(key, 0)
+        # Verify window exists
+        if not self.window or not self.window.winfo_exists():
+            self.running = False
+            return
 
-            # Gérer None explicitement
-            if value is None:
-                if key in ['reward', 'episode_reward']:
-                    label.config(text="+0.00")
-                elif key in ['hp', 'stamina']:
-                    label.config(text="0.0%")
+        try:
+            # Update menu indicator
+            is_menu_open = self.current_stats.get('in_game_menu', False)
+            if hasattr(self, 'menu_status_indicator'):
+                if is_menu_open:
+                    self.menu_status_indicator.config(text="OUI", fg="#e67e22")
                 else:
-                    label.config(text="0")
-                continue
+                    self.menu_status_indicator.config(text="NON", fg="#95a5a6")
 
-            if key in ['reward', 'episode_reward']:
-                label.config(text=f"{value:+.2f}")
-            elif key in ['hp', 'stamina']:
-                label.config(text=f"{value:.1f}%")
-            elif key == 'total_steps':
-                label.config(text=f"{value:,}")
-            elif key == 'game_menu_open_count':
-                count = self.current_stats.get('game_menu_open_count', 0)
-                label.config(text=str(count))
-            else:
-                label.config(text=str(value)) # Afficher step_episode
+            # Boucle
+            for key, label in self.stat_labels.items():
+                value = self.current_stats.get(key, 0)
 
-        # Temps écoulé
-        elapsed = time.time() - self.start_time
-        hours = int(elapsed // 3600)
-        minutes = int((elapsed % 3600) // 60)
-        seconds = int(elapsed % 60)
-        self.time_label.config(text=f"⏱️ Temps: {hours:02d}:{minutes:02d}:{seconds:02d}")
+                # Gérer None explicitement
+                if value is None:
+                    if key in ['reward', 'episode_reward']:
+                        label.config(text="+0.00")
+                    elif key in ['hp', 'stamina']:
+                        label.config(text="0.0%")
+                    else:
+                        label.config(text="0")
+                    continue
 
-        # Mise à jour des graphiques
-        self._update_plots()
+                if key in ['reward', 'episode_reward']:
+                    label.config(text=f"{value:+.2f}")
+                elif key in ['hp', 'stamina']:
+                    label.config(text=f"{value:.1f}%")
+                elif key == 'total_steps':
+                    label.config(text=f"{value:,}")
+                elif key == 'game_menu_open_count':
+                    count = self.current_stats.get('game_menu_open_count', 0)
+                    label.config(text=str(count))
+                else:
+                    label.config(text=str(value)) # Afficher step_episode
 
-        # Mise à jour des fenêtres étendues si ouvertes
-        if self.player_window and self.player_window.winfo_exists():
-            self._update_player_window()
+            # Temps écoulé
+            elapsed = time.time() - self.start_time
+            hours = int(elapsed // 3600)
+            minutes = int((elapsed % 3600) // 60)
+            seconds = int(elapsed % 60)
+            self.time_label.config(text=f"⏱️ Temps: {hours:02d}:{minutes:02d}:{seconds:02d}")
 
-        if self.rewards_window and self.rewards_window.winfo_exists():
-            self._update_rewards_window()
+            # Mise à jour des graphiques
+            self._update_plots()
 
-        # Mise à jour carte 3D si ouverte
-        if self.map_window and self.map_window.winfo_exists():
-            self._update_map_window()
+            # Mise à jour des fenêtres étendues si ouvertes
+            if self.player_window and self.player_window.winfo_exists():
+                self._update_player_window()
+
+            if self.rewards_window and self.rewards_window.winfo_exists():
+                self._update_rewards_window()
+
+                # Mise à jour carte 3D si ouverte
+                if self.map_window and self.map_window.winfo_exists():
+                    self._update_map_window()
+
+        except tk.TclError as display_error:
+            # Window destroyed during update - stop cleanly
+            logger.debug(f"Display update error (window closing): {display_error}")
+            self.running = False
+
+        except Exception as unexpected_display_error:
+            # Unexpected error - log but don't crash
+            logger.error(f"Unexpected error in display update: {unexpected_display_error}")
 
     def _update_plots(self):
-        """Met à jour les graphiques avec échelle intelligente"""
+        """
+        Updates charts with smart scaling
+        """
         if len(self.episode_history) < 2:
             return
 
@@ -3087,29 +3013,33 @@ class TrainingGUI:
             logger.info("Arrêt demandé par l'utilisateur...")
 
     def _on_close(self):
-        """Appelé quand la fenêtre est fermée"""
+        """
+        Called when window is closed (prevents double execution)
+        """
+        # Prevent double close if already closing
+        if self._closing:
+            logger.debug("Close already in progress, ignoring duplicate call")
+            return
+
+        logger.info("GUI close requested by user")
         self._on_stop_clicked()
-        self._save_config()  # Sauvegarder avant fermeture
-        if self.running:
-            self.running = False
-            try:
-                self.window.quit()
-            except (tk.TclError, RuntimeError):
-                pass
+        self.close()  # Use unified close() method
 
     def close(self):
-        """Ferme l'interface"""
-        self._save_config()  # Sauvegarder
+        """
+        Closes GUI properly to avoid threading errors
+        """
+        # Step 1: Signal shutdown to all windows
+        self._save_config()
         self.running = False
 
-        # Nettoyer les canvas matplotlib AVANT de fermer tkinter
+        # Step 2: Clean matplotlib canvases (prevents memory leaks)
         try:
             if hasattr(self, 'map_canvas') and self.map_canvas:
                 self.map_canvas.get_tk_widget().destroy()
                 self.map_canvas = None
         except (tk.TclError, AttributeError, RuntimeError) as close_map_canvas_error:
-            # Widget déjà détruit ou inaccessible
-            logger.error(f"Erreur nettoyage map_canvas: {close_map_canvas_error}")
+            logger.debug(f"Map canvas cleanup error (non-critical): {close_map_canvas_error}")
             self.map_canvas = None
 
         try:
@@ -3117,26 +3047,65 @@ class TrainingGUI:
                 self.canvas.get_tk_widget().destroy()
                 self.canvas = None
         except (tk.TclError, AttributeError, RuntimeError) as cleaning_canvas_error:
-            # Widget déjà détruit ou inaccessible
-            logger.error(f"Erreur nettoyage canvas: {cleaning_canvas_error}")
+            logger.debug(f"Canvas cleanup error (non-critical): {cleaning_canvas_error}")
             self.canvas = None
 
+        # Step 3: Force immediate window destruction (no after() delay)
         try:
             if self.window and self.window.winfo_exists():
-                # Programmer la fermeture depuis le thread GUI
-                self.window.after(100, self._safe_quit)
-        except (tk.TclError, RuntimeError, AttributeError):
-            # Fenêtre déjà détruite ou thread terminé
-            pass
+                self.window.quit()  # Stop mainloop immediately
+                self.window.destroy()  # Destroy window immediately
+                self.window = None
+        except (tk.TclError, RuntimeError, AttributeError) as window_destroy_error:
+            logger.debug(f"Window destruction error (non-critical): {window_destroy_error}")
+            self.window = None
 
-    def _safe_quit(self):
-        """Fermeture sécurisée depuis le thread GUI"""
+        # Step 4: Clean matplotlib canvases (prevents memory leaks)
         try:
-            if self.window and self.window.winfo_exists():
-                self.window.quit()
-                self.window.destroy()
-        except (tk.TclError, RuntimeError):
-            pass  # Ignorer si déjà fermé
+            if hasattr(self, 'map_canvas') and self.map_canvas:
+                self.map_canvas.get_tk_widget().destroy()
+                self.map_canvas = None
+        except (tk.TclError, AttributeError, RuntimeError):
+            self.map_canvas = None
+
+        try:
+            if hasattr(self, 'canvas') and self.canvas:
+                self.canvas.get_tk_widget().destroy()
+                self.canvas = None
+        except (tk.TclError, AttributeError, RuntimeError):
+            self.canvas = None
+
+        # Step 5: Close all child windows
+        for child_window in [self.player_window, self.rewards_window,
+                             self.map_window, self.zone_stats_window]:
+            if child_window:
+                try:
+                    if child_window.winfo_exists():
+                        child_window.destroy()
+                except (tk.TclError, AttributeError, RuntimeError):
+                    pass
+
+        # Step 6: Destroy main window immediately
+        if self.window:
+            try:
+                if self.window.winfo_exists():
+                    self.window.quit()  # Stop mainloop
+                    self.window.update()  # Process pending events
+                    self.window.destroy()  # Destroy window
+            except (tk.TclError, RuntimeError, AttributeError):
+                pass
+            finally:
+                self.window = None
+
+        # Step 7: Wait for GUI thread to finish (non-blocking)
+        if self.update_thread and self.update_thread.is_alive():
+            logger.debug("Waiting for GUI thread termination...")
+            self.update_thread.join(timeout=1.0)
+
+            if self.update_thread.is_alive():
+                logger.debug("GUI thread still alive after 1s (will terminate as daemon)")
+
+        logger.info("GUI closed successfully")
 
     def should_stop(self) -> bool:
         """Retourne True si l'utilisateur a demandé l'arrêt"""

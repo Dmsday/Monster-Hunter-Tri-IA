@@ -34,20 +34,35 @@ import win32con               # Constantes Win32 (SRCCOPY, etc.)
 from utils.module_logger import get_module_logger
 logger = get_module_logger('frame_capture')
 
+# --- DLL Capture (robust alternative) ---
+try:
+    from vision.dolphin_capture_dll import DolphinCaptureDLL
+    DLL_AVAILABLE = True
+except ImportError as dll_import_error:
+    DolphinCaptureDLL = None
+    DLL_AVAILABLE = False
+    logger.warning(f"DolphinCapture.dll not available: {dll_import_error}")
+
 
 class FrameCapture:
     def __init__(self, window_name="Dolphin", target_fps=30, instance_id=0, force_printwindow=False,
-                 expected_window_title=None):
+                 expected_window_title=None, use_dll=True):
         """
         Args:
             window_name: Nom de la fenêtre Dolphin (deprecated, use expected_window_title)
             target_fps: FPS cible pour la capture
             instance_id: ID de l'instance (pour renommage multi-instance)
-            force_printwindow: Forcer PrintWindow pour rtvision
+            force_printwindow: Forcer PrintWindow pour rtvision (ignored if use_dll=True)
             expected_window_title: Titre exact attendu (ex: "MHTri-0") - PRIORITY over instance_id
+            use_dll: Use DolphinCapture.dll if available (recommended for robustness)
         """
         self.window_name = window_name
         self.instance_id = instance_id
+        self.use_dll = use_dll and DLL_AVAILABLE  # Only use if available
+
+        # DLL-specific attributes
+        self.dll_wrapper = None
+        self.dll_instance_id = -1
         self.expected_window_title = expected_window_title
         self.hwnd = None
         self.target_fps = target_fps
@@ -67,6 +82,38 @@ class FrameCapture:
         self._reinit_attempted = False
 
         self.find_window()
+
+        # Initialize DLL if requested and available
+        if self.use_dll:
+            try:
+                logger.info("Initializing DolphinCapture.dll...")
+                self.dll_wrapper = DolphinCaptureDLL()
+
+                # Create instance for this window
+                # Type: int | None (>= 0 on success, -1 on failure, None if error)
+                # noinspection PyTypeChecker
+                dll_result = self.dll_wrapper.create_instance(self.hwnd)
+
+                # Handle None case (DLL error before returning a value)
+                if dll_result is None:
+                    logger.error("DLL create_instance returned None, falling back to GDI")
+                    self.use_dll = False
+                    self.dll_wrapper = None
+                elif dll_result < 0:
+                    logger.error("Failed to create DLL instance, falling back to GDI")
+                    self.use_dll = False
+                    self.dll_wrapper = None
+                else:
+                    self.dll_instance_id = dll_result
+                    logger.debug(f"DLL instance {self.dll_instance_id} ready for HWND {self.hwnd}")
+                    # Disable GDI initialization since we're using DLL
+                    self._gdi_initialized = True  # Fake flag to skip GDI init
+
+            except Exception as dll_init_error:
+                logger.error(f"DLL initialization failed : {dll_init_error}")
+                logger.warning("Falling back to GDI capture")
+                self.use_dll = False
+                self.dll_wrapper = None
 
         # Compteur pour anti-spam
         self.identical_frame_count = 0  # Nombre de frames identiques consécutives
@@ -229,7 +276,7 @@ class FrameCapture:
         # Sort by priority (descending)
         windows.sort(key=lambda x: x[2], reverse=True)
 
-        # Take highest priority window
+        # Take the highest priority window
         self.hwnd, found_title, priority = windows[0]
 
         # Logging according to window found
@@ -302,17 +349,45 @@ class FrameCapture:
         """
         Capture a frame from the Dolphin window with robust error handling
 
-        Args:
-            crop_region: Tuple (x, y, width, height) for a specific area
-
-        Returns:
-            numpy.ndarray: RGB image (H, W, 3)
+        Uses DolphinCapture.dll if available (more robust), otherwise falls back to GDI
         """
-        # Check if shutting down --> stop trying to reconnect
+        # Check if shutting down
         if self._shutdown:
             logger.debug("Frame capture shutdown, returning black frame")
             return self._get_black_frame()
 
+        # ===================================================================
+        # DLL CAPTURE PATH (BETTER - RECOMMENDED)
+        # ===================================================================
+        if self.use_dll and self.dll_wrapper and self.dll_instance_id >= 0:
+            try:
+                # Capture via DLL (handles minimize automatically)
+                frame_bgra = self.dll_wrapper.capture_frame(self.dll_instance_id)
+
+                if frame_bgra is None:
+                    logger.warning("DLL capture returned None, falling back to GDI")
+                    # Don't disable DLL permanently, just retry with GDI this frame
+                    # Fall through to GDI path below
+                else:
+                    # Convert BGRA to RGB
+                    import cv2
+                    frame_rgb = cv2.cvtColor(frame_bgra, cv2.COLOR_BGRA2RGB)
+
+                    # Apply crop if requested
+                    if crop_region:
+                        x, y, w, h = crop_region
+                        if x >= 0 and y >= 0 and x + w <= frame_rgb.shape[1] and y + h <= frame_rgb.shape[0]:
+                            frame_rgb = frame_rgb[y:y + h, x:x + w]
+
+                    return frame_rgb
+
+            except Exception as dll_capture_error:
+                logger.error(f"DLL capture error: {dll_capture_error}")
+                # Fall through to GDI backup
+
+        # ===================================================================
+        # GDI CAPTURE PATH (FALLBACK)
+        # ===================================================================
         # Check if the window exists
         if self.hwnd is None:
             if self._shutdown:  # Double-check before attempting reconnection
@@ -335,35 +410,35 @@ class FrameCapture:
             except (ValueError, RuntimeError, OSError):
                 return self._get_black_frame()
 
-        # Dimensions fenêtre
+        # Window dimensions
         try:
             left, top, right, bottom = win32gui.GetWindowRect(self.hwnd)
             width = right - left
             height = bottom - top
         except Exception as rect_error:
-            logger.error(f"Erreur lecture dimensions: {rect_error}")
+            logger.error(f"Error reading dimensions : {rect_error}")
             return self._get_black_frame()
 
         if width <= 0 or height <= 0:
-            logger.warning(f"Dimensions invalides: {width}x{height}")
+            logger.warning(f"Invalid dimensions : {width}x{height}")
             return self._get_black_frame()
 
-        # Initialiser objets GDI (une seule fois)
+        # Initialize GDI objects (only once)
         try:
             self._init_gdi_objects(width, height)
         except Exception as init_error:
-            logger.error(f"Erreur init GDI: {init_error}")
+            logger.error(f"GDI initialization error : {init_error}")
             return self._get_black_frame()
 
-        # Vérifier que les objets GDI sont bien initialisés
+        # Verify that the GDI objects are properly initialized.
         if not self._gdi_initialized or self._save_dc is None or self._save_bitmap is None:
-            logger.error("Objets GDI non initialisés")
+            logger.error("Uninitialized GDI objects")
             return self._get_black_frame()
 
-        # Choisir methode selon mode
+        # Choose method according to mode
         capture_success = False
 
-        # Si force_printwindow active, sauter BitBlt
+        # If force_printwindow active, skip BitBlt
         if not self.force_printwindow:
             try:
                 self._save_dc.BitBlt(
@@ -374,67 +449,67 @@ class FrameCapture:
                 capture_success = True
 
             except Exception as bitblt_error:
-                logger.warning(f"BitBlt echec: {bitblt_error}")
+                logger.warning(f"BitBlt failed : {bitblt_error}")
                 capture_success = False
         else:
-            # Mode force_printwindow : sauter BitBlt directement
-            logger.debug("Force PrintWindow actif, BitBlt ignore")
+            # Force_printwindow mode : skip BitBlt directly
+            logger.debug("Force PrintWindow active, BitBlt ignored")
 
-        # RECUPERATION DES BITS DU BITMAP (COMMUN AUX DEUX METHODES)
+        # RECOVERING BITS FROM THE BITMAP (COMMON TO BOTH METHODS)
         try:
-            # Verifier que l'objet existe avant GetBitmapBits
+            # Verify that the object exists before GetBitmapBits
             if self._save_bitmap is None:
-                logger.warning("save_bitmap est None - tentative reinit")
+                logger.warning("save_bitmap is None - trying to reinit")
 
                 if not self._reinit_attempted:
                     self._reinit_attempted = True
                     if self._reinit_gdi():
-                        logger.info("Reinit reussie, nouvelle tentative...")
+                        logger.info("Successful reset, new reinit...")
                         return self.capture_frame(crop_region)
 
                 return self._get_black_frame()
 
-            # Recuperer les bits
+            # Recover the bits
             bmpstr = self._save_bitmap.GetBitmapBits(True)
 
         except AttributeError as bitmap_attr_error:
-            # Erreur specifique : objet GDI devenu None
-            logger.warning(f"Objet GDI invalide: {bitmap_attr_error}")
+            # Specific error : GDI object became None
+            logger.warning(f"Invalid GDI object : {bitmap_attr_error}")
 
             if not self._reinit_attempted:
                 self._reinit_attempted = True
                 if self._reinit_gdi():
-                    logger.info("Reinit apres AttributeError...")
+                    logger.info("Reset after AttributeError...")
                     return self.capture_frame(crop_region)
 
             return self._get_black_frame()
 
         except Exception as get_bits_error:
-            logger.warning(f"GetBitmapBits echec: {get_bits_error}")
+            logger.warning(f"GetBitmapBits failed : {get_bits_error}")
             return self._get_black_frame()
 
-        # Verifier que les bits ne sont pas None
+        # Verify that the bits are not None
         if bmpstr is None:
-            logger.warning("GetBitmapBits retourne None")
+            logger.warning("GetBitmapBits returns None")
             return self._get_black_frame()
 
-        # SI BITBLT A ECHOUE, FALLBACK PRINTWINDOW
+        # IF BITBLT FAILED, FALLBACK PRINTWINDOW
         if not capture_success:
-            # Log uniquement si c'est un echec inattendu (pas en mode force)
+            # Log only if it's an unexpected failure (not in forced mode)
             if not self.force_printwindow:
-                logger.warning("Tentative PrintWindow apres echec BitBlt...")
+                logger.warning("Attempting PrintWindow after BitBlt failure...")
             else:
-                # Mode force : comportement normal, pas de warning
-                logger.debug("Utilisation PrintWindow (mode force_printwindow)")
+                # Forced mode : normal behavior, no warnings
+                logger.debug("Using PrintWindow (force_printwindow mode)")
 
             hdc = self._save_dc.GetSafeHdc()
 
             if hdc == 0 or hdc is None:
-                logger.warning("HDC invalide pour PrintWindow")
+                logger.warning("Invalid HDC for PrintWindow")
                 if not self._reinit_attempted:
                     self._reinit_attempted = True
                     if self._reinit_gdi():
-                        logger.info("Nouvelle tentative apres reinit...")
+                        logger.info("Another attempt after reinit...")
                         return self.capture_frame(crop_region)
                 return self._get_black_frame()
 
@@ -448,59 +523,58 @@ class FrameCapture:
             )
 
             if not result:
-                # Log selon contexte
+                # Log depending on context
                 if self.force_printwindow:
-                    logger.debug("PrintWindow retourne False (fenetre minimisee?)")
+                    logger.debug("PrintWindow returns False (minimized window?)")
                 else:
-                    logger.warning("PrintWindow aussi a echoue")
+                    logger.warning("PrintWindow also failed")
 
-            # Re-recuperer les bits apres PrintWindow
+            # Retrieve the bits after PrintWindow
             try:
                 if self._save_bitmap is None:
-                    logger.warning("save_bitmap None apres PrintWindow")
+                    logger.warning("save_bitmap None after PrintWindow")
                     return self._get_black_frame()
 
                 bmpstr = self._save_bitmap.GetBitmapBits(True)
 
                 if bmpstr is None:
-                    logger.warning("GetBitmapBits None apres PrintWindow")
+                    logger.warning("GetBitmapBits None after PrintWindow")
                     return self._get_black_frame()
 
             except Exception as printwindow_bits_error:
-                logger.warning(f"GetBitmapBits apres PrintWindow: {printwindow_bits_error}")
+                logger.warning(f"GetBitmapBits after PrintWindow: {printwindow_bits_error}")
                 return self._get_black_frame()
 
-        # CONVERSION EN IMAGE (COMMUN)
+        # CONVERSION TO IMAGE (COMMON)
         try:
+            import cv2
+
             img = np.frombuffer(bmpstr, dtype=np.uint8)
             img = img.reshape((height, width, 4))
 
-            # Conversion couleur optimisee
+            # Optimized color conversion
             img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
 
-            # Crop si demande
+            # Crop if requested
             if crop_region:
                 x, y, w, h = crop_region
                 if x >= 0 and y >= 0 and x + w <= img.shape[1] and y + h <= img.shape[0]:
                     img = img[y:y + h, x:x + w]
                 else:
-                    logger.warning(f"Crop invalide: {crop_region} pour image {img.shape}")
+                    logger.warning(f"Invalid crop : {crop_region} for image {img.shape}")
 
-            # Reset du flag de reinit si succes
+            # Reset the reinit flag if successful
             self._reinit_attempted = False
 
             return img
 
         except Exception as conversion_error:
-            logger.error(f"Erreur conversion image: {conversion_error}")
+            logger.error(f"Image conversion error: {conversion_error}")
+            logger.error(f"Dimensions: {width}x{height}, buffer size: {len(bmpstr) if bmpstr else 0}")
 
-            # Tentative de reinitialisation (1 fois max par cycle)
-            if not self._reinit_attempted:
-                self._reinit_attempted = True
-                if self._reinit_gdi():
-                    logger.info("Nouvelle tentative apres reinit...")
-                    return self.capture_frame(crop_region)
-
+            # DON'T attempt reinit here - conversion errors are usually fatal
+            # Just return black frame to avoid infinite loop spam
+            self._reinit_attempted = False  # Reset flag for next frame attempt
             return self._get_black_frame()
 
     def _cleanup_gdi(self):
@@ -565,6 +639,17 @@ class FrameCapture:
         """
         Fermeture propre
         """
+        # Cleanup DLL first
+        if self.use_dll and self.dll_wrapper:
+            try:
+                if self.dll_instance_id >= 0:
+                    self.dll_wrapper.destroy_instance(self.dll_instance_id)
+                    self.dll_instance_id = -1
+                logger.info("DLL instance destroyed")
+            except Exception as dll_cleanup_error:
+                logger.error(f"DLL cleanup error: {dll_cleanup_error}")
+
+        # Then cleanup GDI (if it was used as fallback)
         self._cleanup_gdi()
 
     def shutdown(self):
@@ -574,6 +659,15 @@ class FrameCapture:
         """
         self._shutdown = True
         logger.info("Frame capture shutdown - stopping reconnection attempts")
+
+        # Cleanup DLL immediately if active
+        if self.use_dll and self.dll_wrapper and self.dll_instance_id >= 0:
+            try:
+                self.dll_wrapper.destroy_instance(self.dll_instance_id)
+                self.dll_instance_id = -1
+                logger.debug("DLL instance destroyed during shutdown")
+            except Exception as dll_shutdown_error:
+                logger.debug(f"DLL shutdown error (non-critical): {dll_shutdown_error}")
 
     def capture_game_area(self):
         """

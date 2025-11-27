@@ -1,6 +1,6 @@
 """
-Fusion des données mémoire + vision
-v1.5 : Vecteur mémoire étendu à 70 features
+Memory and vision data merging
+v1.5: Memory vector extended to 70 features
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ logger = get_module_logger('state_fusion')
 
 class StateFusion:
     """
-    Fusionne vision + mémoire
+    Merges vision + memory
     """
 
     def __init__(
@@ -48,16 +48,15 @@ class StateFusion:
 
     def get_fused_state(self, frame: np.ndarray) -> Dict:
         """
-        Crée l'état complet combinant vision + mémoire
+        Creates the complete state combining vision and memory
 
         Returns:
-            Dict contenant:
-                - 'visual': Frames prétraitées et stackées (0-1)
-                - 'memory': Vecteur des données mémoire (67 features)
-                - 'exploration_map': Mini-carte locale d'exploration (15x15x3)
-                - 'raw_memory': Données mémoire brutes
+            Dict containing:
+                - 'visual': Preprocessed and stacked frames (0-1)
+                - 'memory': Memory data vector (67 features)
+                - 'exploration_map': Local exploration minimap (15x15x3)
+                - 'raw_memory': Raw memory data
         """
-
         # 1. Traiter la frame
         visual_state = self.preprocessor.process_and_stack(frame)
 

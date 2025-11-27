@@ -119,8 +119,8 @@ class FramePreprocessor:
         else:
             logger.warning("GPU not available --> falling back to CPU processing")
 
-        # Load crop configuration from JSON file if available
-        # This allows dynamic adjustment without code changes
+        # Load crop configuration from ./config/crop_config.json
+        # This file is tracked in git (shared settings, not user-specific)
         crop_config_current_dir = os.path.dirname(os.path.abspath(__file__))
         crop_config_dir = os.path.join(crop_config_current_dir, '..', 'config')
         crop_config_path = os.path.join(crop_config_dir, 'crop_config.json')
@@ -492,7 +492,7 @@ class FramePreprocessor:
         self._numpy_wrapper_calls += 1
         self._total_transfer_time += (t_transfer_end - t_transfer_start)
 
-        if self._numpy_wrapper_calls % 1000 == 0:
+        if self._numpy_wrapper_calls % 10000 == 0:
             avg_transfer = (self._total_transfer_time / self._numpy_wrapper_calls) * 1000
             logger.debug(f"GPU→CPU transfer overhead : {avg_transfer:.2f}ms average over {self._numpy_wrapper_calls} calls")
             logger.debug(f"💡 Tip : Use process_and_stack() directly to eliminate this overhead")
@@ -563,15 +563,16 @@ class FramePreprocessor:
         2. Original frame with crop boundaries overlaid (red rectangle)
         3. Final preprocessed output at target size
 
-        Useful for :
-        - Tuning crop parameters
-        - Debugging preprocessing issues
-        - Documentation and presentations
-
         Args:
             original_frame : Raw game frame to visualize
             save_path : Where to save the visualization image
         """
+        # Default path in vision/debug/ if not specified
+        if save_path is None:
+            debug_dir = os.path.join(".", "vision", "debug")
+            os.makedirs(debug_dir, exist_ok=True)
+            save_path = os.path.join(debug_dir, "crop_visualization.png")
+
         # Crop the frame to show what will be kept
         cropped = self.crop_game_area(original_frame)
 

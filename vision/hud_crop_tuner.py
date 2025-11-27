@@ -267,7 +267,7 @@ class HUDCropTuner:
         self.right_crop = self.default_config['right_crop']
 
     def save_config(self, filepath='config/crop_config.json'):
-        """Sauvegarde la configuration"""
+        """Save crop configuration to config/ (tracked, not user-specific)"""
         config = {
             'top_crop': self.top_crop,
             'bottom_crop': self.bottom_crop,
@@ -275,7 +275,7 @@ class HUDCropTuner:
             'right_crop': self.right_crop
         }
 
-        # Créer dossier si nécessaire
+        # Create config directory if needed
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
 
         with open(filepath, 'w') as f:
@@ -288,7 +288,7 @@ class HUDCropTuner:
         print(f"   right_crop: {self.right_crop:.2f}")
 
     def load_config(self, filepath='config/crop_config.json'):
-        """Charge une configuration existante"""
+        """Load crop configuration from config/ (tracked file)"""
         if os.path.exists(filepath):
             with open(filepath, 'r') as f:
                 config = json.load(f)
@@ -364,10 +364,13 @@ class HUDCropTuner:
                 if action == 'save':
                     self.save_config()
 
-                    # Sauvegarder aussi une image exemple
-                    example_path = 'config/crop_example.png'
+                    # Save example image to vision/debug/
+                    # Config folder should only contain configuration files
+                    example_dir = os.path.join('vision', 'debug')
+                    os.makedirs(example_dir, exist_ok=True)
+                    example_path = os.path.join(example_dir, 'crop_example.png')
                     cv2.imwrite(example_path, display_frame_bgr)
-                    print(f"📸 Exemple sauvegardé: {example_path}")
+                    print(f"📸 Example saved: {example_path}")
 
                     break
 
@@ -447,9 +450,13 @@ def run_with_test_image(image_path: str = None):
 
             if action == 'save':
                 run_tuner.save_config()
-                example_path = 'config/crop_example.png'
+
+                # Save to vision/debug/
+                example_dir = os.path.join('vision', 'debug')
+                os.makedirs(example_dir, exist_ok=True)
+                example_path = os.path.join(example_dir, 'crop_example.png')
                 cv2.imwrite(example_path, display_frame_bgr)
-                print(f"📸 Exemple: {example_path}")
+                print(f"📸 Example: {example_path}")
                 break
 
             elif action == 'quit':

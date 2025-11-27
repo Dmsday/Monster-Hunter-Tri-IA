@@ -307,7 +307,7 @@ class FrameCapture:
         if len(windows) > 1:
             logger.info(f"\n{len(windows)} fenêtres détectées (Top 3):")
             for k, (hwnd, game_title, prio) in enumerate(windows[:3], 1):
-                marker = "👉" if k == 1 else "  "
+                marker = " 👉" if k == 1 else "  "
                 logger.info(f"{marker} {k}. {game_title} (priorité: {prio})")
 
     def _get_black_frame(self):

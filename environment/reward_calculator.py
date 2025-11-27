@@ -20,13 +20,13 @@ class MonsterHunterRewardCalculator:
     """
 
     def __init__(self):
-        # État précédent
+        # Previous state
         self.prev_hp = None
         self.prev_stamina = None
-        self.hp_recovery_given = False  # Flag pour bonus HP recovery
-        self.stamina_recovery_given = False  # Flag pour bonus stamina recovery
-        self.hp_recovery_accumulated = 0.0  # accumulateur HP
-        self.stamina_recovery_accumulated = 0.0  # accumulateur stamina
+        self.hp_recovery_given = False  # Flag for HP recovery bonus
+        self.stamina_recovery_given = False  # Flag for stamina recovery bonus
+        self.hp_recovery_accumulated = 0.0  # HP accumulator
+        self.stamina_recovery_accumulated = 0.0  # Stamina accumulator
 
         self._combat_log_count = 0
         self._debug_marker_check_count = 0
@@ -39,84 +39,85 @@ class MonsterHunterRewardCalculator:
 
         self.prev_sharpness = None
 
-        # Oxygène
+        # Oxygen tracking
         self.prev_oxygen = None
         self.oxygen_low_start_time = None
         self.last_oxygen_penalty_time = None
         self.oxygen_penalty_count = 0
 
-        # Cartographie
-        self.cube_size = 650 # Taille d'un cube
-        self.max_cubes = 250 # Nombre max avant compression
+        # Mapping system
+        self.cube_size = 650  # Size of one spatial cube
+        self.max_cubes = 250  # Max before compression
         self.exploration_tracker = ExplorationTracker(
             cube_size=self.cube_size,
             max_cubes=self.max_cubes,
-            compression_target=0.85  # Cible de compression (85%)
+            compression_target=0.85  # Target compressed size (85%)
         )
 
-        # MENU DU JEU (Start toggle)
-        self.game_menu_entry_time = None  # Timestamp entrée menu
-        self.game_menu_total_time = 0.0  # Temps total dans le menu
-        self.last_menu_penalty_time = None  # Dernier malus appliqué
+        # Game menu (Start toggle)
+        self.game_menu_entry_time = None  # Timestamp when entering menu
+        self.game_menu_total_time = 0.0  # Total accumulated menu time
+        self.last_menu_penalty_time = None  # Last moment a penalty was applied
         self.game_menu_open_count = 0
         self.prev_in_menu = False
 
-        # Timer pour mise à jour marqueurs
+        # Timer for marker updates
         self.last_marker_update = time.time()
-        self.marker_update_interval = 1.0  # Mettre à jour toutes les secondes
+        self.marker_update_interval = 1.0  # Update every 1 second
 
-        #---------------------
-        # Constantes de reward
-        #---------------------
+        # ---------------------
+        # Reward constants
+        # ---------------------
+
         # Exploration
         self.BONUS_NEW_ZONE_DISCOVERED = 2.0
         self.BONUS_NEW_AREA_DISCOVERED = 0.6
         self.PENALTY_REVISIT_AREA = 0.1
 
-        # Menu du jeu
-        self.PENALTY_MENU_THRESHOLD = 5.0  # Seuil avant malus (secondes)
-        self.PENALTY_MENU_BASE = 0.6  # Malus de base
-        self.PENALTY_MENU_RECURRING = 0.2  # Malus récurrent (par 3s)
-        self.MENU_RECURRING_DELAY = 3.0  # Délai entre malus récurrents
+        # Menu system
+        self.PENALTY_MENU_THRESHOLD = 5.0  # Seconds before applying penalty
+        self.PENALTY_MENU_BASE = 0.6  # Base penalty
+        self.PENALTY_MENU_RECURRING = 0.2  # Recurring penalty (every 3s)
+        self.MENU_RECURRING_DELAY = 3.0  # Delay between recurring penalties
 
-        # Tracking présence monstres
-        self.zone_has_monsters = False  # Zone actuelle a des monstres ?
-        self.prev_zone_had_monsters = False  # Zone précédente avait des monstres ?
-        self.prev_in_combat = False  # État combat précédent pour détecter changements
-        self.frames_in_monster_zone = 0  # Compteur de frames en zone avec monstres
-        self.left_monster_zone_count = 0  # Nombre de fois qu'on quitte une zone avec monstres
-        self._last_monster_count = 0  # Compteur interne pour GUI
+        # Monster presence
+        self.zone_has_monsters = False
+        self.prev_zone_had_monsters = False
+        self.prev_in_combat = False
+        self.frames_in_monster_zone = 0
+        self.left_monster_zone_count = 0
+        self._last_monster_count = 0  # Internal counter for GUI
         self._monsters_detected_logged = False
 
-        # Tracking coups donnés
+        # Damage dealt tracking
         self.total_damage_dealt = 0
         self.hit_count = 0
         self.consecutive_hits = 0
 
-        # Tracking immobilité
+        # Movement tracking
         self.frames_stationary = 0
         self.idle_start_time = None
 
-        # Exploration
+        # Exploration distance
         self.total_distance_traveled = 0.0
         self.frames_stationary = 0
 
-        # Camp avec reset après mort
+        # Camp timing (reset after death)
         self.camp_entry_time = None
         self.camp_total_time = 0.0
         self.camp_penalty_triggered = False
         self.last_camp_penalty_period = 0
 
-        # Sortie camp
+        # Camp exit
         self.first_camp_exit = False
         self.just_died = False
         self.camp_exit_after_death = False
 
-        # Zone cooldown
+        # Zone cooldown system
         self.last_zone_change_time = None
         self.zone_change_cooldown = 7.0
 
-        # Tracking dégâts pour réduction malus mort
+        # Damage tracking for lower death penalty
         self.prev_small_monsters_hp = {}
         self.prev_large_monsters_hp = {}
         self.monsters_hit_count = 0
@@ -124,18 +125,18 @@ class MonsterHunterRewardCalculator:
         self.monsters_killed_count = 0
         self.monster_damage_since_zone_change = 0
 
-        # Breakdown
+        # Breakdown logs
         self.reward_breakdown = {}
         self.reward_breakdown_detailed = {}
         self.last_reward_details = {}
 
-        # Multiplicateurs de base
+        # Base multipliers
         self.REWARD_SURVIVAL = 0.005
         self.REWARD_HIT_BASE = 1.0
         self.REWARD_HIT_MULTIPLIER = 0.02
         self.REWARD_ATTACK_ATTEMPT = 0.1
 
-        # Penalite HP dynamique
+        # Dynamic HP penalty
         self.PENALTY_DAMAGE_BASE = 0.1
         self.PENALTY_BIG_HIT = 0.4
         self.PENALTY_LOW_HP = 0.04
@@ -147,7 +148,7 @@ class MonsterHunterRewardCalculator:
         self.PENALTY_DEATH_BASE = 30.0
         self.PENALTY_QUEST_FAILED = 60.0
 
-        # Oxygène
+        # Oxygen
         self.PENALTY_OXYGEN_INITIAL = 0.7
         self.PENALTY_OXYGEN_RECURRING = 0.2
         self.BONUS_OXYGEN_RECOVERY = 0.6
@@ -156,51 +157,52 @@ class MonsterHunterRewardCalculator:
         self.OXYGEN_PENALTY_DELAY = 10.0
         self.OXYGEN_RECURRING_DELAY = 2.0
 
-        # Constantes curiosité
-        self.BONUS_NEW_ZONE_DISCOVERED = 2.0  # Gros bonus pour nouvelle map
-        self.BONUS_NEW_AREA_DISCOVERED = 0.6  # Bonus moyen pour nouvelle zone de la map
-        self.PENALTY_REVISIT_AREA = 0.04  # Petit malus si on revient trop souvent au même endroit
-        self.REVISIT_THRESHOLD = 3  # Nombre de visites avant malus
+        # Curiosity constants
+        self.BONUS_NEW_ZONE_DISCOVERED = 2.0  # Large bonus for new map
+        self.BONUS_NEW_AREA_DISCOVERED = 0.6  # Medium bonus for new area
+        self.PENALTY_REVISIT_AREA = 0.04  # Small penalty if revisiting
+        self.REVISIT_THRESHOLD = 3  # Number of visits before penalty
 
-        # Constantes de présence monstres
-        self.BONUS_IN_MONSTER_ZONE = 0.02  # Petit bonus constant par frame en zone avec monstres
-        self.PENALTY_LEFT_MONSTER_ZONE = 1.5  # Malus si on quitte une zone avec monstres
-        self.BONUS_MONSTER_ZONE_PERSISTENCE = 0.005  # Bonus supplémentaire pour rester longtemps
+        # Monster zone bonuses/penalties
+        self.BONUS_IN_MONSTER_ZONE = 0.02
+        self.PENALTY_LEFT_MONSTER_ZONE = 1.5
+        self.BONUS_MONSTER_ZONE_PERSISTENCE = 0.005
 
-        # Timer pour combat
+        # Combat timer
         self.last_damage_time = 0.0
-        self.combat_timeout = 10.0  # 10 secondes sans dégât = fin combat
+        self.combat_timeout = 10.0  # No damage for 10s = combat end
+        self._combat_damage_accumulated = 0  # Accumulator for combat summary
 
-        # Bonus actions defensives
+        # Defensive action bonuses
         self.BONUS_BLOCK_ATTEMPT = 0.04
         self.BONUS_DODGE_ATTEMPT = 0.06
         self.BONUS_ATTACK_ATTEMPT = 0.05
 
-        # Exploration (avec bruit)
-        self.BONUS_EXPLORATION_BASE = 0.01 # Inutilisé, à garder
-        self.EXPLORATION_NOISE_SCALE = 0.005 # Inutilisé, à garder
+        # Exploration (with noise)
+        self.BONUS_EXPLORATION_BASE = 0.01  # Unused but kept
+        self.EXPLORATION_NOISE_SCALE = 0.005  # Unused but kept
         self.PENALTY_STATIONARY = 0.004
 
-        # Bonus zone change
+        # Zone change bonuses
         self.BONUS_ZONE_CHANGE = 1.0
         self.BONUS_FIRST_CAMP_EXIT = 3.0
         self.BONUS_CAMP_EXIT_AFTER_DEATH = 2.0
 
-        # Camp pénalités
+        # Camp penalties
         self.PENALTY_CAMP_THRESHOLD = 30.0
         self.PENALTY_CAMP_BASE = 0.5
         self.PENALTY_CAMP_INCREMENT = 0.4
         self.PENALTY_CAMP_MAX = 3.0
 
-        # Sharpness
+        # Weapon sharpness
         self.PENALTY_LOW_SHARPNESS = 0.1
         self.PENALTY_BOUNCED = 1.0
 
-        # Monster HP
+        # Monster HP-related rewards
         self.REWARD_MONSTER_HIT = 2.0
         self.REWARD_MONSTER_DAMAGE_MULT = 0.03
 
-        # Bonus kill
+        # Kill bonuses
         self.BONUS_KILL_SMALL_MONSTER = 6.0
         self.BONUS_KILL_LARGE_MONSTER = 20.0
 
@@ -772,29 +774,37 @@ class MonsterHunterRewardCalculator:
             logger.info(f"Changement zone {self.prev_zone} → {current_zone} : Reset état combat")
 
         elif took_damage:
-            # Vient de prendre des dégâts = combat actif
+            # Just took damage = combat active
             was_in_combat = self.prev_in_combat
             in_combat = True
-            self.last_damage_time = current_time  # Mettre à jour le timestamp
+            self.last_damage_time = current_time  # Update timestamp
 
-            # Logger uniquement sur transition False → True
+            # Log only on transition False → True (combat start)
             if not was_in_combat:
                 info['combat_started'] = True
-                logger.info(f"⚔️ COMBAT ACTIF (dégâts pris)")
-                logger.debug(f"DÉBUT COMBAT détecté (Zone {current_zone})")
-                logger.debug(f"Monstres présents: {monster_count_now}")
+                logger.info(f"COMBAT STARTED (Zone {current_zone})")
+                logger.info(f"Monsters present: {monster_count_now}")
+                logger.debug(f"First damage taken: {self._combat_damage_accumulated} HP")
 
         elif time_since_damage < self.combat_timeout:
             # Moins de 10s depuis dernier dégât = combat toujours actif
             in_combat = True
 
         else:
-            # Plus de 10s sans dégât = fin combat
+            # More than 10s without damage = combat ended
             in_combat = False
-            if self.last_damage_time > 0:  # Éviter log au démarrage
+            if self.last_damage_time > 0:  # Avoid log at startup
                 info['combat_ended'] = True
-                logger.info(f"Fin du combat (timeout: {time_since_damage:.1f}s)")
-                logger.debug(f"Raison : Timeout ({time_since_damage:.1f}s sans dégât)")
+
+                # Log combat summary with accumulated damage
+                if hasattr(self, '_combat_damage_accumulated') and self._combat_damage_accumulated > 0:
+                    logger.info(f"COMBAT ENDED (timeout: {time_since_damage:.1f}s)")
+                    logger.info(f"Total damage taken: {self._combat_damage_accumulated} HP")
+                    logger.info(f"Monsters hit: {self.monsters_hit_count}")
+                    # Reset accumulated damage
+                    self._combat_damage_accumulated = 0
+                else:
+                    logger.debug(f"Combat ended (timeout: {time_since_damage:.1f}s)")
             self.last_damage_time = 0.0
 
         # DEBUG : Logger l'état AVANT le calcul
@@ -1583,8 +1593,9 @@ class MonsterHunterRewardCalculator:
         self.monsters_killed_count = 0
         self.monster_damage_since_zone_change = 0
 
-        # Reset timer combat
+        # Reset combat timer and accumulated damage
         self.last_damage_time = 0.0
+        self._combat_damage_accumulated = 0
 
         # Reset l'exploration tracker (compteurs d'épisode uniquement)
         self.exploration_tracker.reset_episode()

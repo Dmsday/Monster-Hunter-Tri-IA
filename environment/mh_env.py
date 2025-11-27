@@ -222,12 +222,20 @@ class MonsterHunterEnv(gym.Env):
                 # MULTI-INSTANCE : Pass expected window title
                 expected_title = f"MHTri-{self.instance_id}" if self.instance_id >= 0 else None
 
+                # Use DLL for robust capture (works even when window covered)
                 self.frame_capture = FrameCapture(
                     target_fps=30,
                     force_printwindow=force_pw,
                     instance_id=self.instance_id,
-                    expected_window_title=expected_title
+                    expected_window_title=expected_title,
+                    use_dll=True  # Enable DLL capture (recommended)
                 )
+
+                # Log capture method
+                if hasattr(self.frame_capture, 'use_dll') and self.frame_capture.use_dll:
+                    logger.info("Using DolphinCapture.dll (robust capture)")
+                else:
+                    logger.warning("Using GDI fallback (less robust)")
 
                 self.preprocessor = FramePreprocessor(
                     target_size=frame_size,
@@ -1247,15 +1255,16 @@ class MonsterHunterEnv(gym.Env):
                             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
             axes[1, 2].axis('off')
 
-            # Sauvegarder
+            # Save to vision/debug/ folder
             import os
-            os.makedirs('./debug', exist_ok=True)
-            filepath = f'./debug/ai_vision_step_{self.total_steps}.png'
+            debug_dir = os.path.join(".", "vision", "debug")
+            os.makedirs(debug_dir, exist_ok=True)
+            filepath = os.path.join(debug_dir, f'ai_vision_step_{self.total_steps}.png')
             plt.tight_layout()
             plt.savefig(filepath, dpi=100, bbox_inches='tight')
             plt.close(fig)
 
-            logger.debug(f"📸 Visualisation IA sauvegardée : {filepath}")
+            logger.debug(f"📸 AI vision visualization saved: {filepath}")
 
         except Exception as viz_error:
             logger.error(f"Erreur visualisation : {viz_error}")
@@ -1672,17 +1681,24 @@ class MonsterHunterEnv(gym.Env):
             try:
                 raw_memory = self.memory.read_game_state()
 
-                # Détecter si dégâts pris avant d'appeler calculate()
+                # Detect if damage was taken before calling calculate()
                 took_damage = False
                 if self.prev_raw_memory is not None:
                     prev_hp = self.prev_raw_memory.get('player_hp', 0) or 0
                     current_hp = raw_memory.get('player_hp', 0) or 0
 
-                    # Si delta HP > 0 et < 100 (pour éviter les resets)
+                    # If HP delta > 0 and < 100 (to avoid resets)
                     hp_delta = prev_hp - current_hp
                     if 0 < hp_delta < 100:
                         took_damage = True
-                        logger.info(f"🩸 Dégâts détectés: {hp_delta} HP")
+                        # Store damage for combat summary (don't spam logs every hit)
+                        if not hasattr(self, '_combat_damage_accumulated'):
+                            self._combat_damage_accumulated = 0
+                        self._combat_damage_accumulated += hp_delta
+
+                        # Log every 50 HP lost (midlife)
+                        if self._combat_damage_accumulated % 50 < hp_delta:
+                            logger.debug(f"🩸 Combat damage: {self._combat_damage_accumulated} HP total")
 
                 # Calcul reward
                 if self.reward_calc:

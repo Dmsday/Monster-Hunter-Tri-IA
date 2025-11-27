@@ -6,6 +6,7 @@ Training script v3.0
 # STANDARD PYTHON IMPORTS
 # ============================================================================
 import os                      # File/folder handling (models/, logs/)
+import signal                  # Add signal handling for robust Ctrl+C
 import sys                     # System (exit, args, platform check)
 import time                    # Time and pauses (sleep, countdown)
 import numpy as np
@@ -141,6 +142,59 @@ def launch_dolphin_instances_via_powershell(
     # Define script_dir early (for cwd parameter)
     script_dir = os.path.dirname(os.path.abspath(__file__))
 
+    # Create temp directory for PID files FIRST (before calling PowerShell)
+    # Store in vision/ folder to keep project root clean
+    vision_dir = os.path.join(script_dir, "vision")
+    temp_dir = os.path.join(vision_dir, "temp")
+
+    try:
+        os.makedirs(temp_dir, exist_ok=True)
+        logger.debug(f"Created temp directory in vision/: {temp_dir}")
+    except Exception as temp_create_error:
+        logger.error(f"Failed to create temp directory: {temp_create_error}")
+        logger.error(f"Path: {temp_dir}")
+        return False
+
+    # Verify temp directory was actually created
+    if not os.path.exists(temp_dir):
+        logger.error(f"temp directory does not exist after creation: {temp_dir}")
+        return False
+
+    logger.debug(f"Temp directory confirmed: {temp_dir}")
+
+    # Create .gitignore inside temp/ and debug/ to exclude all files
+    # This prevents accidentally committing temporary PID files to Git
+    debug_dir = os.path.join(".", "vision", "debug")
+    os.makedirs(debug_dir, exist_ok=True)
+    debug_gitignore = os.path.join(debug_dir, ".gitignore")
+    if not os.path.exists(debug_gitignore):
+        try:
+            with open(debug_gitignore, 'w') as f:
+                f.write("# Ignore all debug visualization images\n")
+                f.write("*.png\n")
+                f.write("*.jpg\n")
+                f.write("# Except this .gitignore itself\n")
+                f.write("!.gitignore\n")
+            logger.debug("Created .gitignore in vision/debug/")
+        except Exception as gitignore_error:
+            logger.debug(f"Could not create debug .gitignore: {gitignore_error}")
+
+    logger.debug(f"Temp directory for PIDs: {temp_dir}")
+    # This prevents accidentally committing temporary PID files to Git
+    gitignore_path = os.path.join(temp_dir, ".gitignore")
+    if not os.path.exists(gitignore_path):
+        try:
+            with open(gitignore_path, 'w') as f:
+                f.write("# Ignore all files in temp/ directory\n")
+                f.write("*\n")
+                f.write("# Except this .gitignore itself\n")
+                f.write("!.gitignore\n")
+            logger.debug("Created .gitignore in temp/ directory")
+        except Exception as gitignore_error:
+            logger.debug(f"Could not create .gitignore: {gitignore_error}")
+
+    logger.debug(f"Temp directory for PIDs: {temp_dir}")
+
     # Normalize and validate dolphin_path
     dolphin_path = os.path.abspath(dolphin_path)
 
@@ -249,7 +303,8 @@ def launch_dolphin_instances_via_powershell(
         "-File", ps_script,
         "-NumInstances", str(num_instances),
         "-NoGUI",
-        "-DolphinExePath", dolphin_path
+        "-DolphinExePath", dolphin_path,
+        "-PidDirectory", temp_dir  # Pass temp directory to PowerShell
     ]
 
     if minimize_dolphin:
@@ -335,8 +390,9 @@ def launch_dolphin_instances_via_powershell(
         check_interval = 0.5  # Check every 500ms
         elapsed = 0
 
+        # PID files are in temp/ subdirectory
         expected_pid_files = [
-            os.path.join(script_dir, f"dolphin_pid_{i}.tmp")
+            os.path.join(temp_dir, f"dolphin_pid_{i}.tmp")
             for i in range(num_instances)
         ]
 
@@ -361,6 +417,21 @@ def launch_dolphin_instances_via_powershell(
         if len(existing_files) < num_instances:
             logger.warning(f"Only {len(existing_files)}/{num_instances} PID files found after {max_wait}s")
             logger.warning("Some instances may not have started correctly")
+
+            # DEBUG: Check if PIDs were created in script root instead of temp/
+            logger.debug("")
+            logger.debug("Checking if PIDs were created in script root...")
+            script_root_pids = []
+            for i in range(num_instances):
+                root_pid_file = os.path.join(script_dir, f"dolphin_pid_{i}.tmp")
+                if os.path.exists(root_pid_file):
+                    script_root_pids.append(root_pid_file)
+                    logger.warning(f"  Found PID in root: {root_pid_file}")
+
+            if script_root_pids:
+                logger.warning("PIDs were created in script root instead of temp/")
+                logger.warning("This means PowerShell did not receive -PidDirectory parameter")
+                logger.warning("Check PowerShell script and parameter passing")
 
         # Extra 1s buffer to ensure files are fully written
         time.sleep(1.0)
@@ -389,10 +460,11 @@ def launch_dolphin_instances_via_powershell(
         # Try to read any PIDs that were created before interruption
         logger.warning("Checking for Dolphin instances that were launched...")
         script_dir_local = os.path.dirname(os.path.abspath(__file__))
+        temp_dir_local = os.path.join(script_dir_local, "temp")
         launched_pids = []
 
         for i in range(num_instances):
-            pid_file = os.path.join(script_dir_local, f"dolphin_pid_{i}.tmp")
+            pid_file = os.path.join(temp_dir_local, f"dolphin_pid_{i}.tmp")
             try:
                 if os.path.exists(pid_file):
                     with open(pid_file, 'r') as f:
@@ -410,6 +482,11 @@ def launch_dolphin_instances_via_powershell(
 
         if launched_pids:
             logger.warning(f"Found {len(launched_pids)} Dolphin instance(s) to close...")
+
+            # Store in global for signal handler
+            global _global_dolphin_pids
+            _global_dolphin_pids = launched_pids
+
             cleanup_dolphin_processes(launched_pids, emergency=True)
             logger.info("Dolphin instances cleanup completed")
         else:
@@ -628,6 +705,50 @@ def cleanup_dolphin_processes(dolphin_pids: list, emergency: bool = False):
 
     logger.warning(f"Cleanup completed: {closed_count} closed, {failed_count} failed")
     logger.warning("=" * 70)
+
+
+# ============================================================================
+# GLOBAL SIGNAL HANDLER FOR ROBUST CLEANUP
+
+_global_dolphin_pids = []  # Track PIDs globally for signal handler
+_global_cleanup_done = False
+
+
+def emergency_signal_handler(signum, _frame):
+    """
+    Global signal handler for SIGINT (Ctrl+C) and SIGTERM
+    Ensures Dolphin instances are closed even if caught in blocking operations
+
+    Args:
+        signum: Signal number
+        _frame: Stack frame (unused but required by signal handler signature)
+    """
+    global _global_cleanup_done
+
+    if _global_cleanup_done:
+        logger.debug("Cleanup already done, ignoring signal")
+        return
+
+    logger.warning("")
+    logger.warning("=" * 70)
+    logger.warning(f"SIGNAL RECEIVED: {signal.Signals(signum).name}")
+    logger.warning("=" * 70)
+
+    # Close Dolphin instances immediately
+    if _global_dolphin_pids:
+        logger.warning(f"Emergency cleanup: closing {len(_global_dolphin_pids)} Dolphin instance(s)...")
+        try:
+            cleanup_dolphin_processes(_global_dolphin_pids, emergency=True)
+            logger.info("Dolphin instances closed")
+        except Exception as cleanup_error:
+            logger.error(f"Error during emergency cleanup: {cleanup_error}")
+
+    _global_cleanup_done = True
+    logger.warning("=" * 70)
+
+    # Exit immediately
+    sys.exit(0)
+# ============================================================================
 
 def wait_for_dolphin_windows(
         num_instances: int,
@@ -1623,6 +1744,23 @@ def main():
 
     args = parser.parse_args()
 
+    # Create config/user/ directory and .gitignore
+    import os
+    config_user_dir = os.path.join(".", "config", "user")
+    os.makedirs(config_user_dir, exist_ok=True)
+
+    config_user_gitignore = os.path.join(config_user_dir, ".gitignore")
+    if not os.path.exists(config_user_gitignore):
+        try:
+            with open(config_user_gitignore, 'w') as f:
+                f.write("# Ignore all user-specific config files\n")
+                f.write("*\n\n")
+                f.write("# Except this .gitignore\n")
+                f.write("!.gitignore\n")
+            logger.debug("Created .gitignore in config/user/")
+        except Exception as gitignore_error:
+            logger.debug(f"Could not create config/user .gitignore: {gitignore_error}")
+
     # Auto-detection du nom d'experience depuis --resume
     if args.resume and args.name is None:
         # Extraire nom depuis chemin : ./models/exp_name/checkpoint.zip
@@ -1750,7 +1888,7 @@ def main():
 
         return True
 
-    # Auto-correct : if only --num-instances provided, set --num-agents to match
+    # Autocorrect : if only --num-instances provided, set --num-agents to match
     if args.num_instances > 1 and args.num_agents == 1:
         logger.warning(f"--num-instances {args.num_instances} provided without --num-agents")
         logger.warning(f"Auto-setting --num-agents to {args.num_instances} (ONE_TO_ONE scenario)")
@@ -2088,13 +2226,15 @@ def main():
                     stacked = base_env.preprocessor.process_and_stack(test_frame)
                     logger.info(f"   Frame stacking : {stacked.shape}")
 
-                    # Sauvegarder visualisation crop
-                    os.makedirs("./debug", exist_ok=True)
+                    # Save crop visualization to vision/debug/
+                    debug_dir = os.path.join(".", "vision", "debug")
+                    os.makedirs(debug_dir, exist_ok=True)
+                    crop_viz_path = os.path.join(debug_dir, "crop_verification_training.png")
                     base_env.preprocessor.visualize_crop(
                         test_frame,
-                        './debug/crop_verification_training.png'
+                        crop_viz_path
                     )
-                    logger.info(f"   Crop visualisation : ./debug/crop_verification_training.png")
+                    logger.info(f"   Crop visualisation: {crop_viz_path}")
 
                 except Exception as vision_error:
                     training_logger.log_error(vision_error, context="Test vision")
@@ -2130,8 +2270,12 @@ def main():
                         axes[2].imshow(test_map[:, :, 2], cmap='Blues')
                         axes[2].set_title("Channel 2: Cubes récents")
                         plt.tight_layout()
-                        plt.savefig('./debug/minimap_test.png', dpi=100)
-                        logger.info(f"   Mini-carte visualisation : ./debug/minimap_test.png")
+                        # Save to vision/debug/
+                        debug_dir = os.path.join(".", "vision", "debug")
+                        os.makedirs(debug_dir, exist_ok=True)
+                        minimap_path = os.path.join(debug_dir, "minimap_test.png")
+                        plt.savefig(minimap_path, dpi=100)
+                        logger.info(f"   Mini-carte visualisation: {minimap_path}")
                         plt.close()
 
                 except Exception as map_error:
@@ -2148,9 +2292,11 @@ def main():
         else:
             logger.info(f"Mode multi-instances : {args.num_instances} instances")
 
-            # Config file for persistence
+            # Config file for persistence - store in config/ folder
             script_dir = os.path.dirname(os.path.abspath(__file__))
-            config_file = os.path.join(script_dir, "dolphin_path_config.json")
+            config_dir = os.path.join(script_dir, "config")
+            os.makedirs(config_dir, exist_ok=True)
+            config_file = os.path.join(config_dir, "dolphin_path_config.json")
 
             # Try to load saved Dolphin path
             if args.dolphin_path is None:
@@ -2175,7 +2321,7 @@ def main():
                     logger.info("Dolphin path not provided, auto-detecting...")
                     args.dolphin_path = auto_detect_or_prompt_dolphin_path()
 
-                    # Save the path for next time
+                    # Save the path for next time in config/user/
                     try:
                         with open(config_file, 'w') as f:
                             json.dump({'dolphin_path': args.dolphin_path}, f, indent=2)
@@ -2323,10 +2469,12 @@ def main():
 
             dolphin_pids = []
             script_dir = os.path.dirname(os.path.abspath(__file__))
+            # Read PIDs from vision/temp/
+            vision_dir = os.path.join(script_dir, "vision")
+            temp_dir = os.path.join(vision_dir, "temp")
 
             for i in range(args.num_instances):
-                pid_file = os.path.join(script_dir, f"dolphin_pid_{i}.tmp")
-
+                pid_file = os.path.join(temp_dir, f"dolphin_pid_{i}.tmp")
                 try:
                     if os.path.exists(pid_file):
                         with open(pid_file, 'r') as f:
@@ -2353,8 +2501,50 @@ def main():
                 logger.error("PowerShell did not create the temporary PID files")
                 logger.error("Check that the PowerShell script is working correctly")
 
+                # CRITICAL: Try to find and close any Dolphin instances manually
+                logger.warning("")
+                logger.warning("=" * 70)
+                logger.warning("ATTEMPTING MANUAL DOLPHIN CLEANUP")
+                logger.warning("=" * 70)
+
+                try:
+                    # noinspection PyUnusedImports
+                    import psutil
+
+                    # Find all Dolphin.exe processes
+                    orphan_pids = []
+                    for proc in psutil.process_iter(['pid', 'name', 'create_time']):
+                        try:
+                            if proc.info['name'] and 'dolphin.exe' in proc.info['name'].lower():
+                                # Only close recently created processes (within last 60 seconds)
+                                proc_age = time.time() - proc.info['create_time']
+                                if proc_age < 60:
+                                    orphan_pids.append(proc.info['pid'])
+                                    logger.warning(
+                                        f"Found recent Dolphin process: PID {proc.info['pid']} (age: {proc_age:.1f}s)")
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            pass
+
+                    if orphan_pids:
+                        logger.warning(f"Closing {len(orphan_pids)} orphan Dolphin process(es)...")
+                        cleanup_dolphin_processes(orphan_pids, emergency=True)
+                        logger.info("Orphan Dolphin processes closed")
+                    else:
+                        logger.warning("No recent Dolphin processes found")
+
+                except ImportError:
+                    logger.error("psutil not available - cannot auto-close Dolphin")
+                    logger.error("Please close Dolphin windows manually")
+                except Exception as manual_cleanup_error:
+                    logger.error(f"Manual cleanup failed: {manual_cleanup_error}")
+
+                logger.warning("=" * 70)
+                logger.warning("")
+
                 if gui:
                     gui.close()
+
+                _cleanup_done = True
                 return
 
             elif pids_found < args.num_instances:
@@ -2369,12 +2559,21 @@ def main():
             # Store PIDs in pre-initialized allocation_result
             allocation_result['dolphin_pids'] = dolphin_pids
 
+            # Also store in global variable for signal handler
+            global _global_dolphin_pids
+            _global_dolphin_pids = dolphin_pids
+            logger.debug(f"PIDs stored globally for signal handler: {dolphin_pids}")
+
             # Verify PIDs were stored correctly
             logger.debug(f"Stored {len(dolphin_pids)} PIDs in allocation_result")
             logger.debug(f"PIDs: {dolphin_pids}")
 
-            # Register emergency cleanup with atexit and signal handlers
-            # This ensures Dolphin windows are closed even if script crashes
+            # Register signal handlers for Ctrl+C and termination
+            # This ensures Dolphin is closed even when blocking (cv2.waitKey, input(), etc.)
+            signal.signal(signal.SIGINT, emergency_signal_handler)
+            signal.signal(signal.SIGTERM, emergency_signal_handler)
+            logger.info("Signal handlers registered (SIGINT, SIGTERM)")
+
             # SIGINT (Ctrl+C) and SIGTERM are handled separately as normal shutdown
             def emergency_cleanup_handler():
                 # Declare global at the very beginning of function
@@ -3545,8 +3744,11 @@ def main():
             # Clean up PID files now that training has started successfully
             if args.num_instances > 1:
                 script_dir = os.path.dirname(os.path.abspath(__file__))
+                # Clean PIDs from vision/temp/
+                vision_dir = os.path.join(script_dir, "vision")
+                temp_dir = os.path.join(vision_dir, "temp")
                 for i in range(args.num_instances):
-                    pid_file = os.path.join(script_dir, f"dolphin_pid_{i}.tmp")
+                    pid_file = os.path.join(temp_dir, f"dolphin_pid_{i}.tmp")
                     try:
                         if os.path.exists(pid_file):
                             os.remove(pid_file)
@@ -3595,9 +3797,11 @@ def main():
             if args.num_instances > 1:
                 logger.debug("Reading PIDs from temporary files...")
                 script_dir = os.path.dirname(os.path.abspath(__file__))
+                vision_dir = os.path.join(script_dir, "vision")
+                temp_dir = os.path.join(vision_dir, "temp")
 
                 for i in range(args.num_instances):
-                    pid_file = os.path.join(script_dir, f"dolphin_pid_{i}.tmp")
+                    pid_file = os.path.join(temp_dir, f"dolphin_pid_{i}.tmp")
                     try:
                         if os.path.exists(pid_file):
                             with open(pid_file, 'r') as f:
@@ -3891,6 +4095,16 @@ def main():
         # Mark cleanup as done to prevent atexit handler from running
         logger.info("Cleanup started...")
 
+        # PRIORITY -1: Close OpenCV windows first (rtvision) to unblock waitKey
+        try:
+            if args.rtvision:
+                logger.info("Closing OpenCV windows (rtvision)...")
+                cv2.destroyAllWindows()
+                cv2.waitKey(1)  # Process window close events
+                logger.debug("OpenCV windows closed")
+        except Exception as cv2_close_error:
+            logger.debug(f"Error closing OpenCV windows: {cv2_close_error}")
+
         # Track if Dolphin instances were launched and cleanup status
         had_dolphin_instances = False
         dolphin_cleanup_successful = False
@@ -3971,6 +4185,37 @@ def main():
             import traceback
             traceback.print_exc()
             dolphin_cleanup_successful = False
+
+        # Clean up remaining PID files in temp/ directory
+        try:
+            if args.num_instances > 1:
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                vision_dir = os.path.join(script_dir, "vision")
+                temp_dir = os.path.join(vision_dir, "temp")
+
+                if os.path.exists(temp_dir):
+                    pid_files_cleaned = 0
+                    for i in range(args.num_instances):
+                        pid_file = os.path.join(temp_dir, f"dolphin_pid_{i}.tmp")
+                        if os.path.exists(pid_file):
+                            try:
+                                os.remove(pid_file)
+                                pid_files_cleaned += 1
+                            except Exception as pid_remove_error:
+                                logger.debug(f"Could not remove {pid_file}: {pid_remove_error}")
+
+                    if pid_files_cleaned > 0:
+                        logger.debug(f"Cleaned up {pid_files_cleaned} PID file(s) from temp/")
+
+                    # Try to remove temp directory if empty
+                    try:
+                        if not os.listdir(temp_dir):
+                            os.rmdir(temp_dir)
+                            logger.debug("Removed empty temp/ directory")
+                    except OSError:
+                        pass  # Directory not empty or other issue, leave it
+        except Exception as temp_cleanup_error:
+            logger.debug(f"Error cleaning temp directory: {temp_cleanup_error}")
 
         # Warn user ONLY if:
         # 1. Dolphin instances were actually launched (had_dolphin_instances = True)
@@ -4065,6 +4310,11 @@ def main():
             logger.error(f"Error closing GUI: {gui_error}")
 
         _cleanup_done = True
+
+        # Also mark global cleanup as done
+        global _global_cleanup_done
+        _global_cleanup_done = True
+
         logger.warning("Terminated")
 
 # ============================================================

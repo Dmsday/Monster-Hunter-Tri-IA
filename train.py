@@ -4095,7 +4095,27 @@ def main():
         # Mark cleanup as done to prevent atexit handler from running
         logger.info("Cleanup started...")
 
-        # PRIORITY -1: Close OpenCV windows first (rtvision) to unblock waitKey
+        # PRIORITY 0: Stop input thread FIRST to avoid stdin blocking
+        try:
+            if 'shutdown_flag' in locals() and shutdown_flag is not None:
+                logger.debug("Signaling input thread to stop...")
+                shutdown_flag['value'] = True
+
+            if 'input_thread' in locals() and input_thread is not None:
+                if input_thread.is_alive():
+                    logger.debug("Waiting for input thread to finish...")
+                    # Give thread time to exit its loop (checks flag every 0.1s)
+                    time.sleep(0.2)
+                    input_thread.join(timeout=2.0)
+
+                    if input_thread.is_alive():
+                        logger.warning("Input thread still alive after timeout - forcing cleanup")
+                    else:
+                        logger.debug("Input thread terminated cleanly")
+        except Exception as thread_cleanup_error:
+            logger.debug(f"Error stopping input thread: {thread_cleanup_error}")
+
+        # PRIORITY 1: Close OpenCV windows (rtvision) to unblock waitKey
         try:
             if args.rtvision:
                 logger.info("Closing OpenCV windows (rtvision)...")
@@ -4109,7 +4129,7 @@ def main():
         had_dolphin_instances = False
         dolphin_cleanup_successful = False
 
-        # PRIORITY 0: Stop frame capture reconnection attempts before closing Dolphin
+        # PRIORITY 2: Stop frame capture reconnection attempts before closing Dolphin
         #             to avoid log error spam
         try:
             if 'env' in locals() and env is not None:
@@ -4135,7 +4155,7 @@ def main():
         except Exception as fc_shutdown_error:
             logger.debug(f"Error signaling frame capture shutdown: {fc_shutdown_error}")
 
-        # PRIORITY 1: Close Dolphin instances (after stopping frame capture)
+        # PRIORITY 3: Close Dolphin instances (after stopping frame capture)
         try:
             # Check if allocation_result exists and has PIDs
             if 'allocation_result' in locals() and allocation_result is not None:
@@ -4232,20 +4252,6 @@ def main():
             logger.error("  3. End task for each instance (sorry)")
             logger.error("=" * 70)
             logger.error("")
-
-        # Stop input thread if GUI mode
-        try:
-            if 'shutdown_flag' in locals() and shutdown_flag is not None:
-                shutdown_flag['value'] = True
-
-            if 'input_thread' in locals() and input_thread is not None:
-                if input_thread.is_alive():
-                    logger.info("Waiting for input thread to finish...")
-                    input_thread.join(timeout=1.0)
-
-        except Exception as thread_cleanup_error:
-            training_logger.log_error(thread_cleanup_error, context="Thread cleanup")
-            logger.error(f"Error cleaning up thread: {thread_cleanup_error}")
 
         # Clean up controller first
         try:

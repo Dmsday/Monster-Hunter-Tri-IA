@@ -30,7 +30,8 @@ param(
     [switch]$MinimizeGame = $false,    # minimize game windows
     [string]$DolphinExePath = "",      # Path to Dolphin.exe (optional)
     [string]$UserFolderPath = "",      # Path to User folder (optional)
-    [string]$RomFilePath = ""          # Path to ROM file (optional)
+    [string]$RomFilePath = "",         # Path to ROM file (optional)
+    [string]$PidDirectory = ""         # Directory for PID files (for Python integration)
 )
 
 # Auto-detect paths if not provided
@@ -1158,10 +1159,109 @@ for ($i = 0; $i -lt $options.Count; $i++) {
         Write-Host "  Instance $i : Created [Input] section" -ForegroundColor Green
     }
     else {
+        # Input section already exists, BackgroundInput was updated
         Write-Host "  Instance $i : Updated [Input] section" -ForegroundColor Green
     }
-    
-    # Write back to file with UTF8 encoding (no BOM)
+
+    # Also configure Graphics settings to render even when minimized
+    $GraphicsIniPath = Join-Path $ConfigFolder "GFX.ini"
+    $GraphicsContent = @()
+    if (Test-Path $GraphicsIniPath) {
+        $GraphicsContent = Get-Content $GraphicsIniPath -Encoding UTF8
+    }
+
+    $HasGeneralSection = $false
+    $ModifiedGraphics = @()
+    $InsideGeneralSection = $false
+    $RenderToMainFound = $false
+
+    foreach ($line in $GraphicsContent) {
+        if ($line -match '^\[General\]') {
+            $HasGeneralSection = $true
+            $InsideGeneralSection = $true
+            $ModifiedGraphics += $line
+            continue
+        }
+        
+        if ($line -match '^\[.*\]' -and $InsideGeneralSection) {
+            if (-not $RenderToMainFound) {
+                $ModifiedGraphics += "RenderToMain = False"
+            }
+            $InsideGeneralSection = $false
+        }
+        
+        if ($line -match '^RenderToMain\s*=') {
+            $RenderToMainFound = $true
+            $ModifiedGraphics += "RenderToMain = False"
+            continue
+        }
+        
+        $ModifiedGraphics += $line
+    }
+
+    if ($HasGeneralSection -and $InsideGeneralSection -and -not $RenderToMainFound) {
+        $ModifiedGraphics += "RenderToMain = False"
+    }
+
+    if (-not $HasGeneralSection) {
+        $ModifiedGraphics += ""
+        $ModifiedGraphics += "[General]"
+        $ModifiedGraphics += "RenderToMain = False"
+    }
+
+    # Add [Core] section to prevent pausing on focus loss
+    $HasCoreSection = $false
+    $ModifiedGraphics2 = @()
+    $InsideCoreSection = $false
+    $PauseOnFocusLostFound = $false
+
+    foreach ($line in $ModifiedGraphics) {
+        if ($line -match '^\[Core\]') {
+            $HasCoreSection = $true
+            $InsideCoreSection = $true
+            $ModifiedGraphics2 += $line
+            continue
+        }
+        
+        if ($line -match '^\[.*\]' -and $InsideCoreSection) {
+            if (-not $PauseOnFocusLostFound) {
+                $ModifiedGraphics2 += "PauseOnFocusLost = False"
+            }
+            $InsideCoreSection = $false
+        }
+        
+        if ($line -match '^PauseOnFocusLost\s*=') {
+            $PauseOnFocusLostFound = $true
+            $ModifiedGraphics2 += "PauseOnFocusLost = False"
+            continue
+        }
+        
+        $ModifiedGraphics2 += $line
+    }
+
+    if ($HasCoreSection -and $InsideCoreSection -and -not $PauseOnFocusLostFound) {
+        $ModifiedGraphics2 += "PauseOnFocusLost = False"
+    }
+
+    if (-not $HasCoreSection) {
+        $ModifiedGraphics2 += ""
+        $ModifiedGraphics2 += "[Core]"
+        $ModifiedGraphics2 += "PauseOnFocusLost = False"
+    }
+
+    $ModifiedGraphics = $ModifiedGraphics2
+
+    # Write Graphics INI (GFX.ini)
+    try {
+        $Utf8NoBom = New-Object System.Text.UTF8Encoding $false
+        [System.IO.File]::WriteAllLines($GraphicsIniPath, $ModifiedGraphics, $Utf8NoBom)
+        Write-Host "  Instance $i : RenderToMain disabled (render when minimized)" -ForegroundColor Green
+    }
+    catch {
+        Write-Host "  Instance $i : ERROR writing GFX.ini: $_" -ForegroundColor Red
+    }
+
+    # Write Dolphin INI (Dolphin.ini)
     try {
         $Utf8NoBom = New-Object System.Text.UTF8Encoding $false
         [System.IO.File]::WriteAllLines($DolphinIniPath, $ModifiedContent, $Utf8NoBom)
@@ -1205,9 +1305,22 @@ for ($i = 0; $i -lt $options.Count; $i++) {
         $instances += $instance
         Write-Host " OK (PID: $($instance.Process.Id))" -ForegroundColor Green
 
-        # Write PID IMMEDIATELY (not at the end)
+        # Write PID
         if ($NoGUI) {
-            $pidFile = "dolphin_pid_$($i).tmp"
+            # Determine PID file path (use PidDirectory if provided)
+            if ([string]::IsNullOrEmpty($PidDirectory)) {
+                # Fallback: script directory
+                $pidFile = Join-Path $PSScriptRoot "dolphin_pid_$($i).tmp"
+            }
+            else {
+                # Use provided temp directory
+                # Ensure directory exists
+                if (-not (Test-Path $PidDirectory -PathType Container)) {
+                    New-Item -ItemType Directory -Path $PidDirectory -Force | Out-Null
+                    Write-Host "  Created PID directory: $PidDirectory" -ForegroundColor Gray
+                }
+                $pidFile = Join-Path $PidDirectory "dolphin_pid_$($i).tmp"
+            }
             
             try {
                 # Write PID with explicit encoding and force flush
@@ -1229,10 +1342,21 @@ for ($i = 0; $i -lt $options.Count; $i++) {
     else {
         Write-Host " FAILED" -ForegroundColor Red
         
-        # Create empty PID file to signal failure
+        # Create PID file with -1 to signal failure
         if ($NoGUI) {
-            $pidFile = "dolphin_pid_$($i).tmp"
+            # Use same logic as success case
+            if ([string]::IsNullOrEmpty($PidDirectory)) {
+                $pidFile = Join-Path $PSScriptRoot "dolphin_pid_$($i).tmp"
+            }
+            else {
+                if (-not (Test-Path $PidDirectory -PathType Container)) {
+                    New-Item -ItemType Directory -Path $PidDirectory -Force | Out-Null
+                }
+                $pidFile = Join-Path $PidDirectory "dolphin_pid_$($i).tmp"
+            }
+            
             "-1" | Out-File -FilePath $pidFile -Encoding ASCII -Force
+            Write-Host "  Failure PID file created: $pidFile" -ForegroundColor DarkGray
         }
     }
 }
@@ -1273,7 +1397,30 @@ Write-Host ""
 if (-not $NoGUI) {
     Show-ControlPanel -Instances $instances
     Write-Host "`nScript termine" -ForegroundColor Cyan
+    
+    # Auto-close CMD window after 60 seconds
+    Write-Host ""
+    Write-Host "Cette fenetre se fermera automatiquement dans 60 secondes..." -ForegroundColor Yellow
+    Write-Host "Appuyez sur une touche pour fermer maintenant" -ForegroundColor Gray
+    
+    # Wait for keypress or 60 second timeout
+    $timeout = 60
+    $startTime = Get-Date
+    
+    while (((Get-Date) - $startTime).TotalSeconds -lt $timeout) {
+        if ([Console]::KeyAvailable) {
+            [Console]::ReadKey($true) | Out-Null
+            Write-Host "Fermeture manuelle..." -ForegroundColor Green
+            break
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    
+    if (((Get-Date) - $startTime).TotalSeconds -ge $timeout) {
+        Write-Host "`nTimeout atteint - Fermeture automatique" -ForegroundColor Yellow
+    }
 }
+
 # MODE AUTOMATIQUE : Pas de panneau, Python prend le relais
 else {
     Write-Host "Mode automatique : Python reprend le controle" -ForegroundColor Green

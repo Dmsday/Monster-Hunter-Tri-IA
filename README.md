@@ -478,9 +478,9 @@ MIT License — see [LICENSE](LICENSE) for details.
 
 Ce projet entraîne un agent **PPO (Proximal Policy Optimization)** à jouer à **Monster Hunter Tri** (Wii) via l'émulateur **Dolphin**. L'IA perçoit le jeu à travers une capture d'écran et une lecture directe de la RAM, et contrôle le personnage via une manette Xbox 360 virtuelle.
 
-> ⚠️ **Statut alpha.** L'agent apprend de zéro et le système de récompenses est encore en cours de réglage. Les résultats constituent une preuve de concept.
+> ⚠️ **Statut alpha.** L'agent apprend de zéro et le système de récompenses est encore en cours d'équilibrage. Les résultats constituent juste une preuve de concept.
 
-> ⚠️ **Note sur les commentaires.** Une partie des commentaires et messages de log est en français et en cours de traduction progressive vers l'anglais.
+> ⚠️ **Note sur les commentaires.** Une partie des commentaires et messages de log sont en français et en cours de traduction progressive vers l'anglais.
 
 ---
 
@@ -492,7 +492,7 @@ L'agent traite deux flux d'information en parallèle :
 
 | Flux | Détails |
 |---|---|
-| **Vision (CNN)** | Frames de jeu redimensionnées à 84×84 px, traitées par un réseau convolutif (Nature DQN / IMPALA / Minigrid) |
+| **Vision (CNN)** | Frames de jeu redimensionnées à 84×84 px, traitées par un réseau convolutif (Nature) |
 | **Vecteur mémoire** | ~70 features lues directement dans la RAM de Dolphin via Dolphin Memory Engine : PV, endurance, position, orientation, inventaire, zone, chrono quête, PV monstres… |
 
 ### Exploration
@@ -720,7 +720,7 @@ python train.py --help
 
 | Argument | Défaut | Description |
 |---|---|---|
-| `--timesteps N` | — | Nombre total de pas d'entraînement |
+| `--timesteps N` | 100 000 | Nombre total de pas d'entraînement |
 | `--name TEXT` | auto | Nom de l'expérience |
 | `--lr FLOAT` | 0.0001 | Taux d'apprentissage |
 | `--save-state N` | 5 | Slot d'état de sauvegarde à recharger (1–8) |

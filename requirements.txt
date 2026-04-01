@@ -1,74 +1,94 @@
-# ============================================================
-# Monster Hunter Tri — Reinforcement Learning AI
-# requirements.txt
+# ====================================
+# REQUIREMENTS - MONSTER HUNTER TRI AI
+# ====================================
 # Python 3.8+ required (tested with 3.10)
-# ============================================================
+# Windows only (DLL injection, win32 capture, Dolphin)
 
-# ------------------------------------------------------------
-# Memory Reading (Dolphin interface)
-# ------------------------------------------------------------
-pymem>=1.13.1
-dolphin-memory-engine>=1.1.0
+# === MEMORY READING ===
+dolphin-memory-engine>=1.1.0     # Dolphin RAM reading (PRIMARY — requires Dolphin running as Admin)
 
-# ------------------------------------------------------------
-# Image Processing & Screen Capture
-# ------------------------------------------------------------
-opencv-python>=4.8.0
-Pillow>=10.0.0
-mss>=9.0.1
-pywin32>=305          # Windows only — win32gui, win32con
+# === CAPTURE & VISION ===
+opencv-python>=4.8.0             # Image processing and frame preprocessing
+pywin32>=305                     # Windows API (GDI capture fallback, window enumeration)
+# DolphinCapture.dll is a compiled C++ DLL — no pip install needed.
+# If necessary, build it from _build/DolphinCapture.cpp using _build/build_dll.py (requires Visual Studio C++ tools).
 
-# ------------------------------------------------------------
-# Deep Learning
-# ------------------------------------------------------------
-torch>=2.0.0
-torchvision>=0.15.0
-# For GPU (CUDA 12.4), replace the two lines above with:
-#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
-# For CPU only:
+# === DEEP LEARNING ===
+torch>=2.0.0                     # PyTorch (CPU or CUDA)
+# For GPU CUDA 13.0 (recommended):
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130 ou https://developer.nvidia.com/cuda-13-0-0-download-archive
+# For GPU CUDA 12.4:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124 ou https://developer.nvidia.com/cuda-12-4-0-download-archive
+# For CPU only (only for debug and tests) :
 #   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+torchvision>=0.15.0              # Vision utilities (used by some CNN feature extractors)
 
-# ------------------------------------------------------------
-# Reinforcement Learning
-# ------------------------------------------------------------
-stable-baselines3>=2.1.0
-gymnasium>=0.29.0
+# === REINFORCEMENT LEARNING ===
+stable-baselines3>=2.1.0         # PPO and other RL algorithms (SB3)
+gymnasium>=0.29.0                # RL environment interface (replaces OpenAI Gym)
 
-# ------------------------------------------------------------
-# Virtual Controller (requires ViGEmBus driver installed)
-# ------------------------------------------------------------
-vgamepad>=0.1.0
+# === INPUT INJECTION (DLL-based, no ViGEmBus needed anymore) ===
+# The controller uses dolphin_input_hook.dll (Rust, built from hook/src/lib.rs).
+# It injects directly into Dolphin's DInput GetDeviceState without needing focus.
+# No vgamepad, no ViGEmBus, no HidHide required.
+# cargo (Rust) is needed to build the DLL if the prebuilt version is missing:
+#   https://rustup.rs
 
-# ------------------------------------------------------------
-# Input Simulation
-# ------------------------------------------------------------
-pynput>=1.7.6
+# === KEYBOARD / SAVE STATE FALLBACK ===
+pynput>=1.7.6                    # Keyboard simulation for save state reload fallback (F5 via pynput)
 
-# ------------------------------------------------------------
-# Visualization & GUI
-# ------------------------------------------------------------
-matplotlib>=3.7.0
+# === REAL-TIME GUI ===
+matplotlib>=3.7.0                # Graphs and 3D exploration map visualization
+# tkinter is bundled with Python on Windows — no pip install needed.
+# If missing on Linux: sudo apt-get install python3-tk
 
-# ------------------------------------------------------------
-# Utilities
-# ------------------------------------------------------------
-numpy>=1.24.0
-psutil>=5.9.0
-tqdm>=4.65.0
+# === MULTI-INSTANCE / PROCESS MANAGEMENT ===
+psutil>=5.9.0                    # Process management, PID tracking, Dolphin cleanup
 
-# ------------------------------------------------------------
-# Monitoring & Logging
-# ------------------------------------------------------------
-tensorboard>=2.13.0
-wandb>=0.15.0         # Optional — set WANDB_MODE=disabled to skip
+# === UTILITIES ===
+numpy>=1.24.0                    # Arrays and numerical operations
+tqdm>=4.65.0                     # Progress bars for genetic training
 
-# ------------------------------------------------------------
-# Testing
-# ------------------------------------------------------------
-pytest>=7.4.0
+# === LOGGING & MONITORING ===
+tensorboard>=2.13.0              # Training visualization (optional but recommended)
+#   Usage: tensorboard --logdir ./logs/
 
-# ------------------------------------------------------------
-# Analysis (Optional)
-# ------------------------------------------------------------
-pandas>=2.0.0
-seaborn>=0.12.0
+# ===================================
+# OPTIONAL — ANALYSIS & EXPERIMENT TRACKING
+# ===================================
+pandas>=2.0.0                    # (Optional) Log data analysis and CSV export
+seaborn>=0.12.0                  # (Optional) Advanced visualizations from training data
+wandb>=0.15.0                    # (Optional) Experiment tracking and run comparison
+pytest>=7.4.0                    # (Optional) Unit tests
+
+
+# ===================================
+# NOT REQUIRED (removed from older versions)
+# ===================================
+# vgamepad     — replaced by DLL injection (dolphin_input_hook.dll)
+# mss          — replaced by DolphinCapture.dll + GDI fallback
+# pymem        — replaced by dolphin-memory-engine direct
+# pillow       — not used in current pipeline
+
+# ===================================
+# INSTALLATION
+# ===================================
+#
+# Standard install:
+#   pip install -r requirements.txt
+#
+# GPU install (CUDA 13.0):
+#   pip install -r requirements.txt
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+#
+# Build the capture DLL (one-time, requires Visual Studio C++ tools):
+#   cd _build
+#   python build_dll.py
+#
+# Build the input hook DLL (one-time, requires Rust/cargo):
+#   cd hook
+#   cargo build --release
+#   copy target\release\dolphin_input_hook.dll ..\vision\
+#
+# Verify everything:
+#   python check_setup.py

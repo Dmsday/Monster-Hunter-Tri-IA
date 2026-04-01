@@ -607,6 +607,15 @@ function Initialize-UserProfiles {
                 # Copy entire User folder structure
                 Copy-Item -Path $BaseUserFolder -Destination $TargetFolder -Recurse -Force -ErrorAction Stop
                 
+                # Remove empty GBA/Saves folders (Dolphin default, unused for Wii games)
+                $GbaFolder = Join-Path $TargetFolder "GBA"
+                if (Test-Path $GbaFolder -PathType Container) {
+                    $GbaFiles = Get-ChildItem -Path $GbaFolder -Recurse -File
+                    if ($GbaFiles.Count -eq 0) {
+                        Remove-Item -Path $GbaFolder -Recurse -Force -ErrorAction SilentlyContinue
+                    }
+                }
+
                 # Verify copy succeeded
                 if (Test-Path $TargetFolder -PathType Container) {
                     Write-Host "  User$i : Created successfully" -ForegroundColor Green
@@ -651,6 +660,16 @@ function Initialize-UserProfiles {
         return $false
     }
     
+    # Also clean base User folder GBA if empty (Dolphin re-creates it on startup if needed)
+    $BaseGba = Join-Path $BaseUserFolder "GBA"
+    if (Test-Path $BaseGba -PathType Container) {
+        $BaseGbaFiles = Get-ChildItem -Path $BaseGba -Recurse -File
+        if ($BaseGbaFiles.Count -eq 0) {
+            Remove-Item -Path $BaseGba -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Host "  Cleaned empty GBA folder from base User" -ForegroundColor DarkGray
+        }
+    }
+
     return $true
 }
 
@@ -1261,11 +1280,62 @@ for ($i = 0; $i -lt $options.Count; $i++) {
         Write-Host "  Instance $i : ERROR writing GFX.ini: $_" -ForegroundColor Red
     }
 
+    # --- Disable audio: add [DSP] Backend = No audio to Dolphin.ini ---
+    $HasDspSection = $false
+    $ModifiedForAudio = @()
+    $InsideDspSection = $false
+    $BackendFound = $false
+
+    foreach ($line in $ModifiedContent) {
+        if ($line -match '^\[DSP\]') {
+            $HasDspSection = $true
+            $InsideDspSection = $true
+            $ModifiedForAudio += $line
+            continue
+        }
+        if ($line -match '^\[.*\]' -and $InsideDspSection) {
+            if (-not $BackendFound) {
+                # Insert mute settings before the next section
+                $ModifiedForAudio += "Backend = No audio"
+                $ModifiedForAudio += "Volume = 0"
+            }
+            $InsideDspSection = $false
+        }
+        if ($line -match '^Backend\s*=') {
+            $BackendFound = $true
+            # Override whatever backend was set with No audio
+            $ModifiedForAudio += "Backend = No audio"
+            continue
+        }
+        if ($line -match '^Volume\s*=') {
+            # Override volume to 0 as a safety net
+            $ModifiedForAudio += "Volume = 0"
+            continue
+        }
+        $ModifiedForAudio += $line
+    }
+
+    # If [DSP] was the last section (no closing section found after it)
+    if ($HasDspSection -and $InsideDspSection -and -not $BackendFound) {
+        $ModifiedForAudio += "Backend = No audio"
+        $ModifiedForAudio += "Volume = 0"
+    }
+
+    # If [DSP] section did not exist at all, append it
+    if (-not $HasDspSection) {
+        $ModifiedForAudio += ""
+        $ModifiedForAudio += "[DSP]"
+        $ModifiedForAudio += "Backend = No audio"
+        $ModifiedForAudio += "Volume = 0"
+    }
+
+    $ModifiedContent = $ModifiedForAudio
+
     # Write Dolphin INI (Dolphin.ini)
     try {
         $Utf8NoBom = New-Object System.Text.UTF8Encoding $false
         [System.IO.File]::WriteAllLines($DolphinIniPath, $ModifiedContent, $Utf8NoBom)
-        Write-Host "  Instance $i : Background Input enabled" -ForegroundColor Green
+        Write-Host "  Instance $i : Background Input enabled + audio muted (No audio backend)" -ForegroundColor Green
     }
     catch {
         Write-Host "  Instance $i : ERROR writing Dolphin.ini: $_" -ForegroundColor Red

@@ -1,0 +1,155 @@
+﻿AI MH/
+├── check_setup.py                          # Vérifie les dépendances et la config avant lancement
+├── structure-en.txt                        # Arborescence du projet (anglais)
+├── structure-fr.txt                        # Ce fichier — arborescence du projet (français)
+├── train.py                                # Point d'entrée principal (lance l'entraînement)
+│
+├── _build/
+│   ├── build_dll.py                        # Compile automatiquement DolphinCapture.dll depuis le C++ (nécessite Visual Studio)
+│   ├── DolphinCapture.cpp                  # Code source C++ de la DLL de capture d'écran
+│   └── test_dolphin_capture.py             # Teste DolphinCapture.dll (détection fenêtre, capture, cycle de vie DLL)
+│
+├── agent/
+│   ├── extractors.py                       # Feature extractors CNN (Nature, IMPALA) pour SB3
+│   ├── ppo_agent.py                        # Création et chargement d'agents PPO avec custom policy
+│   └── __init__.py
+│
+├── backup/
+│   └── first_final_model/
+│       └── final_model.zip                 # Sauvegarde du premier modèle entraîné
+│
+├── config/
+│   ├── crop_config.json                    # Coordonnées de crop pour la capture d'écran
+│   ├── dolphin_path_config.json            # Chemin vers l'exécutable Dolphin
+│   ├── memory_addresses.py                 # Adresses mémoire MH Tri (HP, position, menu, etc.)
+│   ├── __init__.py
+│   └── user/
+│       └── gui_config.json                 # Préférences utilisateur pour le GUI
+│
+├── core/
+│   ├── controller/                         # ── Package contrôleur multi-head hold/release ──
+│   │   ├── __init__.py                     # Re-exports (WiiController, find_dolphin_pid, ACTION_BRANCHES)
+│   │   ├── constants.py                    # DIK scan codes, layout shared memory 280 bytes, VK codes F1-F8
+│   │   ├── action_heads.py                 # 7 têtes (mouvement, caméra, combat, item, menu, sprint), branches, compatibilité
+│   │   ├── action_resolver.py              # Gate menu (mem_menu=0/1) + résolution conflits priorité → set de touches
+│   │   ├── key_state_manager.py            # Moteur diff hold/release (ne press/release que ce qui change entre steps)
+│   │   ├── dll_utils.py                    # Auto-build DLL Rust, injection DLL, résolution PID Dolphin, shared memory
+│   │   └── wii_controller.py               # Classe WiiController : multi-head execute + legacy + save states PostMessage
+│   ├── dynamic_memory_reader.py            # Lecture mémoire Dolphin via DolphinMemoryEngine (toutes les adresses)
+│   ├── exploration_map_incremental.py      # Carte d'exploration incrémentale par zone (cubes visités)
+│   ├── memory_normalizer.py                # Normalisation des valeurs brutes mémoire pour le vecteur observation
+│   ├── memory_state_builder.py             # Construit le dict game_state complet depuis les lectures mémoire
+│   ├── state_fusion.py                     # Fusion vision + mémoire → minimap d'exploration multi-canal
+│   └── __init__.py
+│
+├── docs/
+│   ├── readme.md                           # Documentation du projet (installation, utilisation, architecture)
+│   ├── requirements.txt                    # Liste des dépendances Python avec instructions d'installation
+│   └── CHANGELOG/
+│       └── 0.X.XX.md                       # Changelogs par version (corrections, nouvelles fonctionnalités, notes de migration)
+│
+├── environment/
+│   ├── __init__.py
+│   ├── mh_env.py                           # Environnement Gymnasium principal (init, step, close, mixins)
+│   ├── spaces.py                           # Définition action_space (MultiDiscrete 7 têtes) et observation_space (Dict)
+│   ├── sanitizer.py                        # Nettoyage des infos step (NaN, types numpy → Python natif)
+│   ├── capture_mixin.py                    # Thread async de capture de frames (producteur → queue)
+│   ├── observation_mixin.py                # Construction de l'observation (visual + memory + minimap)
+│   ├── episode_mixin.py                    # Reset épisode, reload save state, détection fin (3 morts, timeout)
+│   ├── reward_bridge_mixin.py              # Interface entre mh_env et RewardCalculator (lecture état, détection dégâts)
+│   └── realtime_display.py                 # Affichage OpenCV temps réel (vision agent, minimap, surveillance multi)
+│
+├── reward/
+│   ├── __init__.py
+│   ├── reward_calculator.py                # Calcul reward principal (survie, combat, exploration, pénalités, combos)
+│   ├── exploration_tracker.py              # Suivi exploration par cubes 3D (zones visitées, distance parcourue)
+│   ├── cube_markers.py                     # Système de marqueurs dynamiques sur la carte d'exploration 3D
+│   ├── camp_tracker.py                     # Détection et pénalité si l'agent reste au camp de base
+│   ├── monster_zone_tracker.py             # Détection de la zone du monstre (reward pour s'en approcher)
+│   └── oxygen_tracker.py                   # Suivi oxygène sous-marin (pénalité si descend trop bas)
+│
+├── GUI/
+│   ├── gui_map3d.py                        # Carte 3D interactive (cubes d'exploration, position joueur)
+│   ├── gui_theme.py                        # Thème et styles pour le GUI d'entraînement
+│   ├── gui_state.py                        # Stockage de données partagé : données d’agent/d’instance, deques, configuration, progression (sans tkinter)
+│   ├── gui_header.py                       # Barre d'en-tête : sélecteurs d'agent/d'instance, indicateurs de performance clés (KPI) en temps réel, progression, bouton Arrêter
+│   ├── gui_statusbar.py                    # Barre d'état inférieure : compteur FPS, avertissement d'isolation
+│   ├── gui_tab_overview.py                 # Onglet Vue d'ensemble : santé/quêtes, entraînement/exploration, position/inventaire
+│   ├── gui_tab_charts.py                   # Onglet Graphiques : récompense de l’épisode, durée, nombre de vues (matplotlib)
+│   ├── gui_tab_rewards.py                  # Onglet Récompenses : graphique à barres détaillé par catégorie, principaux gains/pertes
+│   ├── gui_tab_combat.py                   # Onglet Combat : infos de zone, état du combat, barres de vie des petits monstres
+│   ├── gui_tab_actions.py                  # Onglet Actions : schéma à 7 têtes, lignes de compatibilité, taux d’activation
+│   ├── training_gui.py                     # Orchestrateur principal : API publique, boucle Tk, délégation aux sous-modules
+│   └── __init__.py
+│
+├── hook/
+│   ├── Cargo.toml                          # Config Rust pour la DLL d'injection
+│   ├── Cargo.lock                          # Versions verrouillées des dépendances Rust
+│   ├── src/
+│   │   └── lib.rs                          # Code Rust : hook DInput GetDeviceState + shared memory 256 bytes
+│   └── target/
+│       └── release/
+│           ├── dolphin_input_hook.dll      # DLL compilée injectée dans Dolphin
+│           └── ...                         # Artefacts de build Rust
+│
+├── info/
+│   ├── advanced_logging.py                 # Callback SB3 avancé (log par step, par épisode, reward breakdown)
+│   ├── agent_context.py                    # Thread-local context : quel agent et quel env est actif (pour logs)
+│   ├── module_logger.py                    # Factory de loggers avec préfixe module + agent/env context
+│   └── __init__.py
+│
+├── logs/                               --> # Créé automatiquement au premier entraînement (ou sur erreur)
+│   └── <experiment_name>/
+│       └── <timestamp>/
+│           └── agent_N/
+│               ├── env_M/
+│               │   ├── console.log         # Tous les logs modules (DEBUG+)
+│               │   ├── reward_debug.log    # Récompenses par step
+│               │   └── training_data.jsonl # Données step/épisode (JSONL)
+│               ├── errors.log              # ERROR+ avec tracebacks complets
+│               └── session_summary.json    # Statistiques et infos du run
+│
+├──models/                                  # Créé automatiquement au premier entraînement (ou sur erreur)
+│   └── <experiment_name>/
+│       ├── checkpoint_NNNNN_steps.zip      # Checkpoints périodiques (~tous les 10% de step accomplis)
+│       ├── final_model.zip                 # Modèle final
+│       └── interrupted_NNNNN_steps.zip     # Sauvegardé sur Ctrl+C ou bouton Stop GUI
+│
+├── multi/
+│   ├── genetic_trainer.py                  # Entraînement génétique (mutation, crossover, sélection élites)
+│   ├── multi_agent_scheduler.py            # Scheduling multi-agents (independent, round_robin, majority_vote, weighted)
+│   ├── multi_agent_trainer.py              # Boucle d'entraînement multi-agent (rollout, PPO update, FedAvg sync)
+│   └── __init__.py
+│
+├── train/
+│   ├── agents.py                           # Création agents (single ou multi), test CNN, SingleEnvProxy
+│   ├── allocation.py                       # Allocation agents ↔ instances Dolphin (1:1, N:M, sharing)
+│   ├── callbacks.py                        # Callbacks SB3 (TensorBoard, checkpoints, GUI updates)
+│   ├── cli.py                              # Arguments ligne de commande (argparse)
+│   ├── dolphin.py                          # Lancement/arrêt instances Dolphin, gestion PIDs, cleanup
+│   ├── environment.py                      # Factory d'environnements (single, multi, VecNormalize, tests)
+│   ├── logging_setup.py                    # Configuration des loggers et dossiers de logs
+│   ├── runner.py                           # Orchestrateur principal (setup → train → save → cleanup)
+│   ├── __main__.py                         # python -m train → appelle runner.main()
+│   └── __init__.py
+│
+├── utils/
+│   ├── item_id.txt                         # Table des IDs d'objets MH Tri
+│   ├── weapon_id.txt                       # Table des IDs d'armes MH Tri
+│   ├── memory_vector.py                    # Construction du vecteur mémoire normalisé (70 features)
+│   ├── safe_float.py                       # Conversion float sécurisée (gère NaN, None, overflow)
+│   └── __init__.py
+│
+├── vision/
+│   ├── DolphinCapture.dll                  # DLL C++ de capture d'écran Dolphin (BitBlt focus-free)
+│   ├── dolphin_capture_dll.py              # Wrapper Python ctypes pour DolphinCapture.dll
+│   ├── dolphin_input_hook.dll              # Copie de la DLL Rust d'injection (auto-build depuis hook/)
+│   ├── feature_extractor.py                # Extraction de features visuelles (utilisé en standalone)
+│   ├── frame_capture.py                    # Capture de frames via DLL + fallback win32gui
+│   ├── hud_crop_tuner.py                   # Outil interactif pour calibrer le crop HUD
+│   ├── preprocessing.py                    # Preprocessing frames (resize, grayscale, normalisation, frame stack)
+│   ├── __init__.py
+│   └── debug/
+│       ├── ai_vision_step_*.png            # Captures debug de ce que l'agent voit à chaque step
+│       ├── crop_verification_training.png  # Vérification visuelle du crop avant entraînement
+│       └── minimap_test.png                # Test de la minimap d'exploration

@@ -1,6 +1,6 @@
 # Item ID - valeur int 2 bytes
 
-0 = no items
+0 = no item
 1 = pt bombe baril
 2 = gd bombe baril
 3 = fosse piégée

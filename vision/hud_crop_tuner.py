@@ -191,10 +191,10 @@ class HUDCropTuner:
 
     def handle_key(self, key):
         """
-        Gère les inputs clavier
+        Handles keyboard inputs
 
         Args:
-            key: Code de touche OpenCV
+            key: OpenCV keycode
 
         Returns:
             action: 'continue', 'save', 'quit'

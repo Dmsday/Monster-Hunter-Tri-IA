@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from utils.module_logger import get_module_logger
+from info.module_logger import get_module_logger
 
 logger = get_module_logger('dolphin_capture_dll')
 
@@ -21,17 +21,25 @@ class DolphinCaptureDLL:
 
     def __init__(self, dll_path: str = "DolphinCapture.dll"):
         """
-        Load DLL and setup function signatures
+        Load DLL and setup function signatures with detailed error messages
 
         Args:
             dll_path: Path to DolphinCapture.dll
         """
-        # Load DLL
+        # Load DLL with absolute path resolution
         dll_full_path = Path(dll_path).absolute()
-        if not dll_full_path.exists():
-            raise FileNotFoundError(f"DLL not found: {dll_full_path}")
 
-        logger.info(f"Loading DolphinCapture.dll: {dll_full_path}")
+        if not dll_full_path.exists():
+            error_msg = (
+                f"DolphinCapture.dll NOT FOUND\n"
+                f"   Expected location: {dll_full_path}\n"
+                f"   Current working dir: {Path.cwd()}\n"
+                f"💡 Place DolphinCapture.dll in project root or vision/ folder"
+            )
+            logger.error(error_msg)
+            raise FileNotFoundError(error_msg)
+
+        logger.debug(f"Loading DolphinCapture.dll from: {dll_full_path}")
 
         try:
             self.dll = ctypes.WinDLL(str(dll_full_path))
@@ -73,7 +81,7 @@ class DolphinCaptureDLL:
         self.dll.DolphinCapture_DestroyAll.argtypes = []
         self.dll.DolphinCapture_DestroyAll.restype = None
 
-        logger.info("DLL loaded successfully")
+        logger.debug("DLL loaded successfully")
 
     def create_instance(self, hwnd: int) -> int:
         """
@@ -88,7 +96,7 @@ class DolphinCaptureDLL:
         instance_id = self.dll.DolphinCapture_CreateInstance(hwnd)
 
         if instance_id >= 0:
-            logger.info(f"Created DLL instance {instance_id} for HWND {hwnd}")
+            logger.debug(f"Created DLL instance {instance_id} for HWND {hwnd}")
         else:
             logger.error(f"Failed to create DLL instance for HWND {hwnd}")
 
@@ -143,7 +151,7 @@ class DolphinCaptureDLL:
     def destroy_instance(self, instance_id: int):
         """Destroy specific instance"""
         self.dll.DolphinCapture_DestroyInstance(instance_id)
-        logger.info(f"Destroyed DLL instance {instance_id}")
+        logger.debug(f"Destroyed DLL instance {instance_id}")
 
     def destroy_all(self):
         """Destroy all instances"""

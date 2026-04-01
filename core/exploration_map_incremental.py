@@ -16,7 +16,7 @@ from typing import Tuple, Set, Optional
 
 # Import MarkerType pour les marqueurs
 try:
-    from environment.cube_markers import MarkerType
+    from reward.cube_markers import MarkerType
 except ImportError:
     # Fallback si module non trouvé
     class MarkerType:

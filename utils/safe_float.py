@@ -1,14 +1,16 @@
 """
-Fonction utilitaire pour convertir des valeurs en float sécurisé
-Évite les NaN/Inf qui peuvent causer des crashs
+Fonction utilitaire pour convertir des valeurs en float sécurisé.
+Évite les NaN/Inf qui peuvent causer des crashs dans les vecteurs d'observation.
+
+Aucune dépendance externe : utilise uniquement math de la stdlib.
 """
 
-import numpy as np
+import math
 
 
 def safe_float(value, default=0.0, min_val=-1e6, max_val=1e6):
     """
-    Convertit une valeur en float sécurisé
+    Convertit une valeur en float sécurisé.
 
     Protections :
     - Remplace None par default
@@ -16,13 +18,13 @@ def safe_float(value, default=0.0, min_val=-1e6, max_val=1e6):
     - Clamp entre min_val et max_val
 
     Args:
-        value: Valeur à convertir
-        default: Valeur par défaut si invalide
-        min_val: Valeur minimale autorisée
-        max_val: Valeur maximale autorisée
+        value:   Valeur à convertir (int, float, numpy scalar, str, None…)
+        default: Valeur de remplacement si la valeur est invalide
+        min_val: Borne inférieure autorisée (clamp)
+        max_val: Borne supérieure autorisée (clamp)
 
     Returns:
-        Float sécurisé
+        float sécurisé dans [min_val, max_val]
     """
     try:
         if value is None:
@@ -30,12 +32,12 @@ def safe_float(value, default=0.0, min_val=-1e6, max_val=1e6):
 
         val = float(value)
 
-        # Vérifier NaN/Inf
-        if np.isnan(val) or np.isinf(val):
+        # Rejeter NaN et Inf (math.isnan/isinf fonctionnent sur tout float Python)
+        if math.isnan(val) or math.isinf(val):
             return default
 
-        # Clamp dans les limites
-        return float(np.clip(val, min_val, max_val))
+        # Clamp sans numpy : max/min Python pur, retourne un float natif
+        return max(min_val, min(max_val, val))
 
     except (ValueError, TypeError):
         return default

@@ -32,7 +32,7 @@ import win32con               # Win32 constants (SRCCOPY, etc.)
 # CUSTOM MODULES
 # ============================================================================
 # --- Logging ---
-from utils.module_logger import get_module_logger
+from info.module_logger import get_module_logger
 logger = get_module_logger('frame_capture')
 
 # --- DLL Capture (robust alternative) ---
@@ -253,7 +253,8 @@ class FrameCapture:
                             # Prendre premier mot après le tiret
                             num_str = parts[1].split()[0] if parts[1] else ""
                             window_num = int(num_str)
-                            if 1 <= window_num <= 100:
+                            # Include 0: MHTri-0 is the first instance in multi-instance mode
+                            if 0 <= window_num <= 100:
                                 is_mhtri_numbered = True
                                 mhtri_number = window_num
                     except (ValueError, IndexError):
@@ -305,11 +306,14 @@ class FrameCapture:
             logger.info(f"  Expected: '{self.expected_window_title}'")
             logger.info(f"  HWND: {self.hwnd}")
             logger.info(f"  Priorité: {priority}")
+        elif priority >= 10000:
+            # Correct instance found via fallback priority (instance_id=0 without expected_window_title)
+            logger.debug(f"Correct window found via priority matching: '{found_title}' (priority={priority})")
         elif priority >= 1000:
             num = 1000 - priority
-            logger.warning(f"Instance {self.instance_id} : Fenêtre MHTri-{num} trouvée (ATTENDU: MHTri-{self.instance_id})")
-            logger.warning(f"  Titre: '{found_title}'")
-            logger.warning(f"  RISQUE DE COLLISION - Vérifie renommage Dolphin")
+            logger.warning(f"Instance {self.instance_id}: found MHTri-{num} (expected MHTri-{self.instance_id})")
+            logger.warning(f"  Title: '{found_title}'")
+            logger.warning(f"  Collision risk - check Dolphin window renaming")
         elif priority >= 900:
             logger.info(f"Fenêtre Monster Hunter Tri trouvée !")
             logger.info(f" Titre: '{found_title}'")
@@ -325,7 +329,7 @@ class FrameCapture:
 
         # Afficher autres fenêtres trouvées (top 3)
         if len(windows) > 1:
-            logger.info(f"\n{len(windows)} fenêtres détectées (Top 3):")
+            logger.info(f"{len(windows)} fenêtres détectées (Top 3):")
             for k, (hwnd, game_title, prio) in enumerate(windows[:3], 1):
                 marker = " 👉" if k == 1 else "  "
                 logger.info(f"{marker} {k}. {game_title} (priorité: {prio})")

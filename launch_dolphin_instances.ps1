@@ -1463,6 +1463,37 @@ foreach ($instance in $instances) {
 Write-Host "`nLancement termine : $($instances.Count) instance(s) active(s)" -ForegroundColor Green
 Write-Host ""
 
+# ============================================================
+# CLEANUP: Remove GBA/Saves folders created by Dolphin on startup
+# Dolphin re-creates them during initialization even after pre-launch cleanup.
+# We clean them again here, after window detection confirms Dolphin is fully ready.
+# ============================================================
+Write-Host "Cleaning up GBA folders created by Dolphin initialization..." -ForegroundColor Cyan
+$DolphinDirClean = Split-Path -Parent $Config.DolphinPath
+
+for ($i = 0; $i -lt $options.Count; $i++) {
+    $UserFolderName = if ($i -eq 0) { "User" } else { "User$i" }
+    $UserFolderPath = Join-Path $DolphinDirClean $UserFolderName
+    $GbaFolder = Join-Path $UserFolderPath "GBA"
+
+    if (Test-Path $GbaFolder -PathType Container) {
+        try {
+            # Only remove if folder contains no actual GBA save files
+            $GbaFiles = Get-ChildItem -Path $GbaFolder -Recurse -File -ErrorAction SilentlyContinue
+            if ($GbaFiles.Count -eq 0) {
+                Remove-Item -Path $GbaFolder -Recurse -Force -ErrorAction SilentlyContinue
+                Write-Host "  Instance $i ($UserFolderName) : GBA folder removed" -ForegroundColor DarkGray
+            } else {
+                Write-Host "  Instance $i ($UserFolderName) : GBA folder kept (contains $($GbaFiles.Count) file(s))" -ForegroundColor DarkGray
+            }
+        } catch {
+            Write-Host "  Instance $i : Could not remove GBA folder: $_" -ForegroundColor Yellow
+        }
+    }
+}
+Write-Host "GBA cleanup complete" -ForegroundColor Green
+Write-Host ""
+
 # MODE INTERACTIF : Afficher panneau de controle
 if (-not $NoGUI) {
     Show-ControlPanel -Instances $instances

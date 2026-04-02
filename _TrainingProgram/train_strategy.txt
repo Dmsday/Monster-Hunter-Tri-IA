@@ -1,0 +1,20 @@
+Phase A — Explorer et survivre :
+python train.py --timesteps 500000 --num-agents 6 --num-instances 6 --multi-agent-mode independent --env hybrid --lr 3e-4 --name phaseA_explore --no-gui
+
+
+Phase B — Approcher les monstres (resume depuis Phase A) :
+python train.py --resume ./models/phaseA_explore --timesteps 1000000 --num-agents 6 --num-instances 6 --multi-agent-mode independent --env hybrid --lr 2e-4 --name phaseB_approach --no-gui
+
+La transition A→B charge les 6 modèles 1:1 et baisse le LR. L'entropy est contrôlé par ppo_agent.py (déjà mis à 0.03).
+Pour la Phase B, modifie temporairement ent_coef à 0.02 dans ppo_agent.py avant de lancer — ça réduit l'exploration aléatoire maintenant que les agents savent se déplacer.
+
+
+Phase C — Évolution génétique (6 modèles → 8 agents, clone les 2 meilleurs) :
+python train.py --resume ./models/phaseB_approach --timesteps 2000000 --num-agents 8 --num-instances 6 --multi-agent-mode genetic --genetic-generations 15 --genetic-elite-ratio 0.25 --genetic-mutation-rate 0.25 --env hybrid --lr 1e-4 --name phaseC_genetic --no-gui
+
+Note : 8 agents mais seulement 6 instances — c'est du INSTANCE_SHARING, 2 instances sont partagées par 2 agents.
+Ça utilise moins de RAM que 8 Dolphins tout en ayant 8 cerveaux qui évoluent génétiquement.
+
+
+Phase D — Maîtriser le combat (8 modèles → 8 agents, 8 instances, full power) :
+python train.py --resume ./models/phaseC_genetic --timesteps 5000000 --num-agents 8 --num-instances 8 --multi-agent-mode genetic --genetic-generations 20 --genetic-elite-ratio 0.25 --genetic-mutation-rate 0.15 --env hybrid --lr 5e-5 --name phaseD_master --no-gui

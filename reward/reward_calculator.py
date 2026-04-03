@@ -29,7 +29,7 @@ from reward.camp_tracker import CampTracker
 from reward.monster_zone_tracker import MonsterZoneTracker
 
 from core.controller.action_heads import (
-    HEAD_MOVEMENT, HEAD_COMBAT, HEAD_SPRINT, NUM_HEADS
+    HEAD_MOVEMENT, HEAD_COMBAT, NUM_HEADS
 )
 
 # =============================================================================
@@ -65,11 +65,15 @@ DEFAULT_REWARD_CONFIG = {
     "REVISIT_THRESHOLD":            3,
     "PENALTY_STATIONARY":           0.004,
 
-    # Monster damage
-    "REWARD_MONSTER_HIT":           2.0,
-    "REWARD_MONSTER_DAMAGE_MULT":   0.03,
-    "BONUS_KILL_SMALL_MONSTER":     6.0,
-    "BONUS_KILL_LARGE_MONSTER":     20.0,
+    # Small monster damage (balanced with health_loss: ~3 total for a full kill)
+    "REWARD_SMONSTER_HIT": 0.5,
+    "REWARD_SMONSTER_DAMAGE_MULT": 0.01,
+    "BONUS_KILL_SMALL_MONSTER": 2.0,
+
+    # Large monster damage (100% HP dealt = PENALTY_DEATH_BASE, kill = 3x)
+    "REWARD_LMONSTER_HIT": 1.5,
+    "REWARD_LMONSTER_DAMAGE_SCALE": 30.0,  # total reward for 100% HP = 1 death penalty
+    "BONUS_KILL_LARGE_MONSTER": 90.0,  # 3 × PENALTY_DEATH_BASE
 
     # Zone change
     "BONUS_ZONE_CHANGE":            1.0,
@@ -168,6 +172,8 @@ class MonsterHunterRewardCalculator:
         # Monster damage tracking
         self.prev_small_monsters_hp     = {}
         self.prev_large_monsters_hp     = {}
+        self.lmonster_hp_max            = {}  # Tracked max HP per large monster
+        self.lmonster_killed            = {}  # Flag: True once killed (ignore post-death garbage)
         self.monsters_hit_count         = 0
         self.total_monster_damage       = 0
         self.monsters_killed_count      = 0
@@ -294,13 +300,11 @@ class MonsterHunterRewardCalculator:
         if hasattr(action, '__len__') and len(action) >= NUM_HEADS:
             combat_branch = int(action[HEAD_COMBAT])  # 0=nothing,1=atk1,2=atk2,3=dodge,4=draw,5=ztarget
             movement_branch = int(action[HEAD_MOVEMENT])  # 0=nothing,1=fwd,2=back,3=strL,4=strR
-            sprint_branch = int(action[HEAD_SPRINT])  # 0=nothing,1=sprint
             info['last_action'] = [int(a) for a in action]
         else:
             # Legacy int fallback
             combat_branch = 0
             movement_branch = 0
-            sprint_branch = 0
             info['last_action'] = action
 
         # ----------------------------------------------------------------
@@ -452,7 +456,6 @@ class MonsterHunterRewardCalculator:
             info                   = info,
             reward_breakdown       = self.reward_breakdown,
             reward_breakdown_detailed = self.reward_breakdown_detailed,
-            frames_stationary      = self.frames_stationary,
             monsters_hit_count     = self.monsters_hit_count,
         )
 
@@ -801,11 +804,12 @@ class MonsterHunterRewardCalculator:
         info['oxygen_penalty_count']    = self.oxygen_tracker.oxygen_penalty_count
         info['left_monster_zone_count'] = self.monster_zone_tracker.left_monster_zone_count
 
-        # Monster HP for GUI
+        # Monster HP for GUI (small monsters + large monster current + max)
         for i in range(1, 6):
             k = f'smonster{i}_hp'
             info[k] = current_state.get(k, 0) or 0
         info['lmonster1_hp'] = current_state.get('lmonster1_hp', 0) or 0
+        info['lmonster1_hp_max'] = current_state.get('lmonster1_hp_max', 0) or 0
 
         # ----------------------------------------------------------------
         # Ensure all breakdown categories exist (even if zero)
@@ -883,7 +887,7 @@ class MonsterHunterRewardCalculator:
         discovery_reward = exploration_result['discovery_reward']
 
         # Global scaling: reduce exploration reward by 10×
-        discovery_reward /= 10.0
+        discovery_reward /= 50.0
 
         if current_zone == 0:
             if self.camp_tracker.just_died:
@@ -938,7 +942,7 @@ class MonsterHunterRewardCalculator:
         total_damage = 0
 
         for i in range(1, 6):
-            key        = f'smonster{i}_hp'
+            key = f'smonster{i}_hp'
             current_hp = current_state.get(key)
             if current_hp is None or current_hp < 0:
                 continue
@@ -948,15 +952,16 @@ class MonsterHunterRewardCalculator:
                 damage = prev_hp - current_hp
                 if damage > 1000:
                     logger.warning(
-                        f"Aberrant monster HP delta: {damage} "
+                        f"Aberrant small monster HP delta: {damage} "
                         f"(monster {i}: {prev_hp} → {current_hp}) — ignored"
                     )
                     self.prev_small_monsters_hp[i] = current_hp
                     continue
 
-                damage        = min(damage, 50)
+                damage = min(damage, 50)
                 total_damage += damage
-                m_reward      = self.REWARD_MONSTER_HIT + (damage * self.REWARD_MONSTER_DAMAGE_MULT)
+                # Small monster: flat hit bonus + small damage multiplier
+                m_reward = self.REWARD_SMONSTER_HIT + (damage * self.REWARD_SMONSTER_DAMAGE_MULT)
 
                 if current_hp == 0 and prev_hp > 0:
                     m_reward += self.BONUS_KILL_SMALL_MONSTER
@@ -968,10 +973,26 @@ class MonsterHunterRewardCalculator:
             self.prev_small_monsters_hp[i] = current_hp
 
         for i in range(1, 2):
-            key        = f'lmonster{i}_hp'
+            # Skip if already killed (pointer chain returns garbage after death)
+            if self.lmonster_killed.get(i, False):
+                continue
+
+            key = f'lmonster{i}_hp'
             current_hp = current_state.get(key)
             if current_hp is None or current_hp < 0:
                 continue
+
+            # Track max HP for %-based reward (read once when first seen > 0)
+            max_hp_key = f'lmonster{i}_hp_max'
+            hp_max = current_state.get(max_hp_key, 0) or 0
+            if hp_max > 0 and i not in self.lmonster_hp_max:
+                self.lmonster_hp_max[i] = hp_max
+                logger.info(f"Large monster {i} max HP tracked: {hp_max}")
+            elif hp_max > 0:
+                # Update if game reports a higher value (shouldn't happen, safety net)
+                self.lmonster_hp_max[i] = max(self.lmonster_hp_max[i], hp_max)
+
+            effective_max = self.lmonster_hp_max.get(i, 0)
 
             prev_hp = self.prev_large_monsters_hp.get(i)
             if prev_hp is not None and prev_hp > current_hp:
@@ -984,13 +1005,26 @@ class MonsterHunterRewardCalculator:
                     self.prev_large_monsters_hp[i] = current_hp
                     continue
 
-                m_reward = (self.REWARD_MONSTER_HIT * 2) + (damage * self.REWARD_MONSTER_DAMAGE_MULT)
+                # Large monster: %-based reward proportional to death penalty
+                if effective_max > 0:
+                    hp_pct = damage / effective_max
+                    m_reward = self.REWARD_LMONSTER_HIT + (hp_pct * self.REWARD_LMONSTER_DAMAGE_SCALE)
+                else:
+                    # Fallback if max HP unknown: flat reward (should rarely happen)
+                    m_reward = self.REWARD_LMONSTER_HIT + (damage * 0.01)
+                    logger.debug(f"Large monster {i}: max HP unknown, using flat fallback")
+
                 if current_hp == 0 and prev_hp > 0:
                     m_reward += self.BONUS_KILL_LARGE_MONSTER
                     self.monsters_killed_count += 1
-                    logger.info(f"BOSS {i} DEFEATED! Bonus: +{self.BONUS_KILL_LARGE_MONSTER:.1f}")
+                    self.lmonster_killed[i] = True  # Stop tracking post-death garbage
+                    logger.info(
+                        f"BOSS {i} DEFEATED! Kill bonus: +{self.BONUS_KILL_LARGE_MONSTER:.1f} "
+                        f"(total damage reward ≈ {self.REWARD_LMONSTER_DAMAGE_SCALE:.1f})"
+                    )
 
                 reward += m_reward
+                total_damage += damage
 
             self.prev_large_monsters_hp[i] = current_hp
 
@@ -1032,48 +1066,50 @@ class MonsterHunterRewardCalculator:
                 logger.warning(f"Octree inconsistency after reset — zone {zone_id}")
 
         # Own state
-        self.prev_hp                        = None
-        self.prev_stamina                   = None
-        self.hp_recovery_given              = False
-        self.stamina_recovery_given         = False
-        self.hp_recovery_accumulated        = 0.0
-        self.stamina_recovery_accumulated   = 0.0
-        self.prev_damage_flag               = None
-        self.prev_death_count               = 0
-        self.prev_position                  = None
-        self.prev_orientation               = None
-        self.prev_zone                      = None
-        self.prev_sharpness                 = None
-        self.prev_oxygen                    = None
+        self.prev_hp                          = None
+        self.prev_stamina                     = None
+        self.hp_recovery_given                = False
+        self.stamina_recovery_given           = False
+        self.hp_recovery_accumulated          = 0.0
+        self.stamina_recovery_accumulated     = 0.0
+        self.prev_damage_flag                 = None
+        self.prev_death_count                 = 0
+        self.prev_position                    = None
+        self.prev_orientation                 = None
+        self.prev_zone                        = None
+        self.prev_sharpness                   = None
+        self.prev_oxygen                      = None
 
         self.prev_small_monsters_hp.clear()
         self.prev_large_monsters_hp.clear()
-        self.monsters_hit_count             = 0
-        self.total_monster_damage           = 0
-        self.monsters_killed_count          = 0
+        self.lmonster_hp_max.clear()
+        self.lmonster_killed.clear()
+        self.monsters_hit_count               = 0
+        self.total_monster_damage             = 0
+        self.monsters_killed_count            = 0
         self.monster_damage_since_zone_change = 0
 
-        self.frames_stationary              = 0
-        self.idle_start_time                = None
-        self.total_distance_traveled        = 0.0
-        self.total_damage_dealt             = 0
-        self.hit_count                      = 0
-        self.consecutive_hits               = 0
+        self.frames_stationary                = 0
+        self.idle_start_time                  = None
+        self.total_distance_traveled          = 0.0
+        self.total_damage_dealt               = 0
+        self.hit_count                        = 0
+        self.consecutive_hits                 = 0
 
-        self.game_menu_entry_time           = None
-        self.game_menu_total_time           = 0.0
-        self.last_menu_penalty_time         = None
-        self.game_menu_open_count           = 0
-        self.prev_in_menu                   = False
-        self._menu_open_streak = 0
-        self._menu_closed_streak = 0
+        self.game_menu_entry_time             = None
+        self.game_menu_total_time             = 0.0
+        self.last_menu_penalty_time           = None
+        self.game_menu_open_count             = 0
+        self.prev_in_menu                     = False
+        self._menu_open_streak                = 0
+        self._menu_closed_streak              = 0
 
-        self.last_zone_change_time          = None
-        self._combat_log_count              = 0
+        self.last_zone_change_time            = None
+        self._combat_log_count                = 0
 
-        self.reward_breakdown               = {}
-        self.reward_breakdown_detailed      = {}
-        self.last_reward_details            = {}
+        self.reward_breakdown                 = {}
+        self.reward_breakdown_detailed        = {}
+        self.last_reward_details              = {}
 
     def full_reset(self):
         """

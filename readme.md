@@ -53,20 +53,38 @@ This project trains a Deep Reinforcement Learning agent to play **Monster Hunter
 | Memory          | `(70,)`                     | HP, stamina, position, orientation, zone, inventory (24 slots), monsters, sharpness, etc. |
 | Exploration map | `(15, 15, 4)`               | Local minimap with 4 channels: visits, player position, recent cubes, markers             |
 
+> **Action head coordination:** The 7 heads use **Transformer self-attention** (2 layers, 4 attn heads) to coordinate decisions before producing logits. See [Action heads](#action-heads) for details
+
 ### Multi-Head Action Space
-The agent controls **7 independent action heads** simultaneously via `MultiDiscrete([5, 5, 5, 2, 3, 8, 2])`:
+The agent controls **7 action heads** simultaneously via `MultiDiscrete([5, 5, 5, 2, 3, 8, 2])`:
 
 | Head                           | Actions | Description                                                                                                 |
 |--------------------------------|---------|-------------------------------------------------------------------------------------------------------------|
 | Movement                       | 5       | nothing / forward / backward / strafe L / strafe R                                                          |
 | Camera                         | 5       | nothing / up / down / left / right                                                                          |
-| Combat                         | 5       | nothing / attack1 / attack2 / dodge / draw-sheath                                                           |
+| Combat                         | 5       | nothing / attack / dodge / draw-sheath / kick                                                               |
 | Use Item                       | 2       | nothing / use                                                                                               |
 | Select Item                    | 3       | nothing / radial left / radial right                                                                        |
 | Menu (**disabled by default**) | 8       | nothing / start / nav up/down/left/right / confirm / back — re-enable with `--disabled-heads` (no argument) |
 | Sprint                         | 2       | nothing / sprint                                                                                            |
 
 Keys are **held across steps** (hold/release model) — no jerky single-frame taps.
+
+#### Transformer Cross-Attention (default)
+
+By default, the 7 action heads are **not independent**: they coordinate decisions through a **Transformer self-attention** module (`TransformerActionHead`). Instead of 7 separate Linear layers reading the same latent vector (like before), each head receives its own token embedding with a positional identity, then all 7 tokens pass through 2 layers of multi-head self-attention before producing logits.
+
+This allows heads to learn cross-head coordination — e.g. "don't sprint while attacking", "don't open menu while dodging" — **proactively in the network**, rather than relying solely on post-hoc compatibility masking.
+
+| Property        | Value                                |
+|-----------------|--------------------------------------|
+| Architecture    | Pre-norm self-attention, 2 layers    |
+| Embedding dim   | 48 per head token                    |
+| Attention heads | 4                                    |
+| Parameters      | ~130K (vs ~8K for standard Linear)   |
+| Overhead        | ~0.1ms per forward pass (negligible) |
+
+To disable the Transformer and revert to standard independent Linear heads, use `--no-transformer-heads`.
 
 ### Focus-Free DLL Injection
 Inputs are injected directly into Dolphin's `IDirectInputDevice8::GetDeviceState` via a Rust DLL (`dolphin_input_hook.dll`). No ViGEmBus, no HidHide, no window focus required. Multiple instances can run fully minimized.
@@ -92,7 +110,7 @@ Inputs are injected directly into Dolphin's `IDirectInputDevice8::GetDeviceState
 
 ### Reward System
 Multi-category reward with separate trackers:
-- Survival (per-step), combat hits, exploration (cube discovery), zone changes
+- Combat hits, exploration (cube discovery), zone changes
 - Damage taken, death penalty, idle/stationary penalty, menu penalty
 - Camp timer, monster zone presence, oxygen (underwater), sharpness
 
@@ -105,7 +123,7 @@ The full annotated project tree is available in **`structure-en.txt`** (English)
 The two directories below are **not present in the repository** — they are created automatically once training starts (or is interrupted):
 
 - `logs/<experiment>/<timestamp>/` — per-agent/per-env log files, reward breakdowns, session summaries
-- `models/<experiment>/` — checkpoints, final model, interrupted saves
+- `models/<experiment>/<timestamp>/` — checkpoints, final model, interrupted saves
 
 ## Requirements
 
@@ -173,7 +191,6 @@ python build_dll.py
 3. Launch Dolphin once to generate the `User/` folder, then close it
 
 **Step 2: Graphics Settings**
-- Graphics → Backend: `Direct3D 11` or `Vulkan` (not OpenGL)
 - Config → Interface: **uncheck** "Confirm on Stop"
 - Config → Interface: **uncheck** "Pause on Focus Lost"
 - GFX.ini → `[General]` → `RenderToMain = False` (auto-set by the launcher)
@@ -208,9 +225,14 @@ Go to **Controllers → Wiimote 1 → Configure → Device: DInput/0/Keyboard Mo
 **Step 4: Dolphin path**
 - On first launch of `train.py`, you'll be prompted for the Dolphin folder path.
 - The path is saved to `config/dolphin_path_config.json` for future runs.
-- Or pass it directly: `--dolphin-path "C:\Dolphin"`
+- Or pass it directly: `--dolphin-path "C:\Dolphin-x64"`
 
-**Step 5: HUD Crop Calibration (optional)**
+**Step 5: ROM path (automatic)**
+- The ROM (`.rvz`, `.iso`, `.wbfs`) is auto-detected from `Jeux/`, `Games/`, or `ROMs/` folders next to the Dolphin directory.
+- The path is saved to `config/rom_path_config.json` for future runs.
+- Or pass it directly: `--rom-path "D:\Games\MonsterHunterTri.rvz"`
+
+**Step 6: HUD Crop Calibration (optional)**
 ```bash
 python vision/hud_crop_tuner.py
 # Interactive OpenCV tool — adjust crop to remove HP/minimap HUDs
@@ -223,19 +245,40 @@ python vision/hud_crop_tuner.py
 When `train.py` launches multiple instances, it calls the PowerShell script which:
 1. Detects if `User1/`, `User2/`, etc. folders exist
 2. **Auto-creates missing ones** by copying the base `User/` folder
-3. Enables `BackgroundInput = True` in each instance's `Dolphin.ini`
-4. Disables audio (`[DSP] Backend = No audio`) per instance
-5. Renames render windows to `MHTri-0`, `MHTri-1`, etc. for per-instance targeting
+3. Disables audio (`[DSP] Backend = No audio`) per instance
+4. Renames render windows to `MHTri-0`, `MHTri-1`, etc. for per-instance targeting
 
 Expected Dolphin folder structure:
 ```
-C:\Dolphin\
+Dolphin-x64\
 ├── Dolphin.exe
 ├── portable.txt
+├── launch_dolphin_instances.ps1   #  MUST be here
+├── Dolphin_Multi_Instance.bat     #  MUST be here (manual launcher)
 ├── User\           # Instance 0 (base)
 ├── User1\          # Instance 1 (auto-created)
 ├── User2\          # Instance 2 (auto-created)
-└── launch_dolphin_instances.ps1
+└── ...
+```
+
+> **⚠️ Important:** `launch_dolphin_instances.ps1` and `Dolphin_Multi_Instance.bat` **must be placed inside the Dolphin directory** (next to `Dolphin.exe`). The script auto-detects Dolphin's path from its own location. If these files are elsewhere, pass `--dolphin-path` explicitly (for the first time only).
+
+The ROM file (`.rvz`, `.iso`, `.wbfs`) is auto-detected by searching `Jeux/`, `Games/`, or `ROMs/` folders **next to** the Dolphin directory. Example layout:
+```
+MySetup\
+├── Dolphin-x64\          # Contains Dolphin.exe + scripts
+│   ├── Dolphin.exe
+│   ├── launch_dolphin_instances.ps1
+│   ├── Dolphin_Multi_Instance.bat
+│   └── User\
+└── Games\                  # ROM folder (sibling of Dolphin dir)
+    └── MHtri\
+        └── MonsterHunterTri.rvz
+```
+
+To override auto-detection, pass `--rom-path`:
+```bash
+python train.py --rom-path "D:\Games\MonsterHunterTri.rvz" --num-instances 6
 ```
 
 ---
@@ -281,11 +324,12 @@ All arguments with their defaults and usage:
 #### Action heads
 | Argument                   | Default   |  Description                                                                                                                                                                                                                                                               |
 |----------------------------|-----------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `--disabled-heads HEAD...` | `menu`    | Space-separated list of heads to disable. Pass with no argument to enable all heads. Valid values: `movement`, `camera`, `combat`, `use_item`, `select_item`, `menu`, `sprint`. **The `menu` head is disabled by default** to prevent the agent from getting low to train. |
+| `--disabled-heads HEAD...` | `menu`    | Space-separated list of heads to disable. Pass with no argument to enable all heads. Valid values: `movement`, `camera`, `combat`, `use_item`, `select_item`, `menu`, `sprint`. **The `menu` head is disabled by default** to prevent the agent from getting stuck in menus. |
+| `--no-transformer-heads`   | off       | Disable Transformer cross-attention between the 7 action heads. Reverts to standard independent Linear layers (SB3 default). Use this for smaller experiments or to match old checkpoints trained without Transformer. |
 
 Examples:
 ```bash
-# Default: menu disabled
+# Default: menu disabled, Transformer heads active
 python train.py
 
 # Disable menu AND use_item
@@ -293,7 +337,17 @@ python train.py --disabled-heads menu use_item
 
 # Enable ALL heads (including menu)
 python train.py --disabled-heads
+
+# Use standard Linear heads instead of Transformer
+python train.py --no-transformer-heads
 ```
+
+#### Dolphin
+| Argument                    | Default | Description                                                                                                                                                      |
+|-----------------------------|---------|------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `--dolphin-path PATH`       | auto    | Path to `Dolphin.exe` or its parent folder. Auto-detected from common locations, then saved to `config/dolphin_path_config.json` for future runs.                |
+| `--rom-path PATH`           | auto    | Path to the Monster Hunter Tri ROM (`.rvz`, `.iso`, `.wbfs`). Auto-detected from `Jeux/`, `Games/`, or `ROMs/` folders next to the Dolphin directory.            |
+| `--dolphin-timeout SECONDS` | `60`    | Timeout waiting for Dolphin windows to appear after launch                                                                                                       |
 
 #### Multi-agent / Multi-instance
 | Argument                    | Default                   | Description                                                                                                                                                                                                    |
@@ -301,14 +355,12 @@ python train.py --disabled-heads
 | `--num-agents N`            | same as `--num-instances` | Number of independent PPO agents (1–10, or up to 32 with `--nolimit`)                                                                                                                                          |
 | `--num-instances N`         | `1`                       | Number of Dolphin instances to launch (1–10, or up to 16 with `--nolimit`)                                                                                                                                     |
 | `--nolimit`                 | off                       | **Bypass the 10-agent / 10-instance safety cap.** This cap exists to avoid accidentally freezing your PC. With `--nolimit` you can go up to 32 agents / 16 instances. A confirmation prompt will still appear. |
-| `--dolphin-path PATH`       | auto                      | Path to `Dolphin.exe` or its parent folder (saved after first run)                                                                                                                                             |
-| `--multi-agent-mode MODE`   | `independent`             | `independent`, `round_robin`, `majority_vote`, `genetic`                                                                                                                                                       |
+| `--multi-agent-mode MODE`   | `independent`             | `independent`, `round_robin`, `majority_vote`, `weighted`, `genetic`                                                                                                                                           |
 | `--allocation-mode MODE`    | `auto`                    | `auto`, `manual`, `weighted`                                                                                                                                                                                   |
 | `--allocation-map MAP`      | —                         | Manual mapping string, e.g. `"0:0,1;1:2,3"`                                                                                                                                                                    |
 | `--steps-per-agent N`       | `4096`                    | Rollout steps collected per agent before each PPO update                                                                                                                                                       |
 | `--block-size N`            | `100`                     | Steps per agent per block in `round_robin` mode                                                                                                                                                                |
 | `--weighted-eval-freq N`    | `100`                     | Episodes between allocation re-evaluations in `weighted` mode                                                                                                                                                  |
-| `--dolphin-timeout SECONDS` | `60`                      | Timeout waiting for Dolphin windows to appear                                                                                                                                                                  |
 | `--genetic-generations N`   | `10`                      | Number of generations (genetic mode)                                                                                                                                                                           |
 | `--genetic-elite-ratio R`   | `0.25`                    | Fraction of agents kept as elites (genetic mode)                                                                                                                                                               |
 | `--genetic-mutation-rate R` | `0.3`                     | Mutation rate (genetic mode)                                                                                                                                                                                   |
@@ -323,8 +375,7 @@ python train.py --disabled-heads
 | Argument          | Default | Description                                                 |
 |-------------------|---------|-------------------------------------------------------------|
 | `--debug-steps N` | —       | Override `--timesteps` with a small value for quick testing |
-| `--small-rollout` | off     | Use `n_steps=256` (short rollouts, useful for debugging)    |
-| `--log-memory`    | off     | Periodically log memory vectors to console                  |
+| `--small-rollout` | off     | Use `n_steps=512` (short rollouts, useful for debugging)    |
 
 ---
 
@@ -390,7 +441,7 @@ TimeoutError: Shared memory 'DolphinInputHook_SharedMem_XXXX' not available
 ```bash
 python train.py --grayscale              # 1 channel instead of 3 per frame
 python train.py --cpu                    # Force CPU (slower)
-python train.py --small-rollout          # n_steps=256, batch_size=64
+python train.py --small-rollout          # n_steps=512, batch_size=64
 ```
 
 ### Multi-Instance: Wrong Window Captured
@@ -420,7 +471,7 @@ Contributions are welcome!
 
 ### Areas for Contribution
 - **Translation** — convert French code comments to English
-- **Memory addresses** — find missing addresses (weapon ID, large monster HP)
+- **Memory addresses** — find missing addresses (weapon/armor ID)
 - **Reward tuning** — improve the reward shaping for faster learning
 - **New CNN architectures** — try EfficientNet, ResNet, etc.
 - **Tests** — add unit tests in `pytest`
@@ -488,20 +539,38 @@ Ce projet entraîne une IA par **Apprentissage par Renforcement Profond** à jou
 | Mémoire           | `(70,)`        | HP, stamina, position, orientation, zone, inventaire (24 slots), monstres, tranchant, etc. |
 | Carte exploration | `(15, 15, 4)`  | Minimap locale avec 4 canaux : visites, position joueur, cubes récents, marqueurs          |
 
-### Espace d'Action Multi-Têtes
-L'agent contrôle **7 têtes d'action indépendantes** simultanément via `MultiDiscrete([5, 5, 5, 2, 3, 8, 2])` :
+> **Coordination des têtes :** Les 7 têtes utilisent un **Transformer à self-attention** (2 couches, 4 têtes d'attention) pour coordonner leurs décisions avant de produire les actions. Voir [Têtes d'action](#têtes-daction) pour les détails.
 
-| Tête              | Actions   | Description                                                    |
-|-------------------|-----------|----------------------------------------------------------------|
-| Mouvement         | 5         | rien / avant / arrière / gauche / droite                       |
-| Caméra            | 5         | rien / haut / bas / gauche / droite                            |
-| Combat            | 5         | rien / attaque1 / attaque2 / esquive / dégainer                |
-| Utiliser Item     | 2         | rien / utiliser                                                |
-| Sélectionner Item | 3         | rien / radial gauche / radial droite                           |
-| Menu              | 8         | rien / start / nav haut/bas/gauche/droite / confirmer / retour |
-| Sprint            | 2         | rien / sprint                                                  |
+### Espace d'Action Multi-Têtes
+L'agent contrôle **7 têtes d'action** simultanément via `MultiDiscrete([5, 5, 5, 2, 3, 8, 2])` :
+
+| Tête              | Actions | Description                                                    |
+|-------------------|---------|----------------------------------------------------------------|
+| Mouvement         | 5       | rien / avant / arrière / gauche / droite                       |
+| Caméra            | 5       | rien / haut / bas / gauche / droite                            |
+| Combat            | 5       | rien / attaque / esquive / dégainer / coup de pied             |
+| Utiliser Item     | 2       | rien / utiliser                                                |
+| Sélectionner Item | 3       | rien / radial gauche / radial droite                           |
+| Menu              | 8       | rien / start / nav haut/bas/gauche/droite / confirmer / retour |
+| Sprint            | 2       | rien / sprint                                                  |
 
 Les touches sont **maintenues entre les steps** (modèle hold/release) — pas de simples tapotements.
+
+#### Cross-Attention Transformer (par défaut)
+
+Par défaut, les 7 têtes ne sont **pas indépendantes** : elles coordonnent leurs décisions via un module **Transformer à self-attention** (`TransformerActionHead`). Au lieu de 7 couches linéaires lisant le même vecteur latent, chaque tête reçoit son propre token avec une identité positionnelle, puis les 7 tokens passent par 2 couches de multi-head self-attention avant de produire les logits.
+
+Cela permet aux têtes d'apprendre la coordination inter-têtes — ex. « ne pas sprinter en attaquant », « ne pas ouvrir le menu en esquivant » — **de manière proactive dans le réseau**, plutôt que de dépendre uniquement du masquage de compatibilité post-hoc.
+
+| Propriété          | Valeur                                |
+|--------------------|---------------------------------------|
+| Architecture       | Self-attention pre-norm, 2 couches    |
+| Dimension embedding | 48 par token de tête                  |
+| Têtes d'attention  | 4                                     |
+| Paramètres         | ~130K (vs ~8K pour linéaire standard) |
+| Surcoût            | ~0.1ms par forward pass (négligeable) |
+
+Pour désactiver le Transformer et revenir aux couches linéaires indépendantes, utiliser `--no-transformer-heads`.
 
 ### Injection DLL sans Focus
 Les inputs sont injectés directement dans `IDirectInputDevice8::GetDeviceState` de Dolphin via une DLL Rust (`dolphin_input_hook.dll`). Aucun ViGEmBus, aucun HidHide, aucun focus de fenêtre requis. Plusieurs instances peuvent tourner entièrement minimisées.
@@ -540,7 +609,7 @@ L'arborescence complète annotée est disponible dans **`structure-fr.txt`** (fr
 Les deux répertoires ci-dessous sont **absents du dépôt** - ils sont créés automatiquement dès qu'un entraînement se termine (ou est interrompu) :
 
 - `logs/<expérience>/<horodatage>/` — logs par agent/env, breakdowns reward, résumés de session
-- `models/<expérience>/` — checkpoints, modèle final, sauvegardes en cas d'interruption
+- `models/<expérience>/<horodatage>/` — checkpoints, modèle final, sauvegardes en cas d'interruption
 
 ## Prérequis
 
@@ -552,8 +621,6 @@ Les deux répertoires ci-dessous sont **absents du dépôt** - ils sont créés 
 | Monster Hunter Tri | NTSC-U ou PAL | ISO / WBFS / RVZ                                                              |
 | Rust / cargo       | dernière      | Seulement si `dolphin_input_hook.dll` est manquant (DLL pré-compilée incluse) |
 | Visual Studio C++  | 2019 ou 2022  | Seulement si `DolphinCapture.dll` est manquante (DLL pré-compilée incluse)    |
-
-> **Pas de ViGEmBus, pas de HidHide, pas de vgamepad** - le nouveau système d'injection DLL ne nécessite rien de tout cela.
 
 ### Matériel
 | Composant   | Minimum   | Recommandé                |
@@ -608,7 +675,6 @@ python build_dll.py
 3. Lancer Dolphin une fois pour générer le dossier `User/`, puis fermer
 
 **Étape 2 : Paramètres graphiques**
-- Graphics → Backend : `Direct3D 11` ou `Vulkan` (pas OpenGL)
 - Config → Interface : **décocher** "Confirm on Stop"
 - Config → Interface : **décocher** "Pause on Focus Lost"
 - GFX.ini → `[General]` → `RenderToMain = False` (configuré automatiquement par le launcher)
@@ -641,6 +707,16 @@ Aller dans **Manette → Wiimote 1 → Configurer → Périphérique : DInput/0/
 >NOTE : Sur un clavier AZERTY, Dolphin interprète les touches comme si le clavier était en QWERTY, donc les lettres affichées ne correspondent pas forcément aux touches physiques. Tant que la touche s’illumine en rouge dans la configuration lorsque vous appuyez dessus, le mapping est correct.
 
 **Étape 4 : Chemin Dolphin**
+- Au premier lancement de `train.py`, le chemin vers le dossier Dolphin sera demandé.
+- Le chemin est sauvegardé dans `config/dolphin_path_config.json` pour les prochains runs.
+- Ou passe-le directement : `--dolphin-path "C:\Dolphin-x64"`
+
+**Étape 5 : Chemin ROM (automatique)**
+- La ROM (`.rvz`, `.iso`, `.wbfs`) est auto-détectée depuis les dossiers `Jeux/`, `Games/` ou `ROMs/` à côté du répertoire Dolphin.
+- Le chemin est sauvegardé dans `config/rom_path_config.json` pour les prochains runs.
+- Ou passe-le directement : `--rom-path "D:\Games\MonsterHunterTri.rvz"`
+
+**Étape 6 : Calibration du crop HUD (optionnel)**
 ```bash
 python vision/hud_crop_tuner.py
 # Outil OpenCV interactif — ajuster le crop pour supprimer la barre de vie/minimap
@@ -659,13 +735,35 @@ Quand `train.py` lance plusieurs instances, il appelle le script PowerShell qui 
 
 Structure attendue du dossier Dolphin :
 ```
-C:\Dolphin\
+Dolphin-x64\
 ├── Dolphin.exe
 ├── portable.txt
+├── launch_dolphin_instances.ps1   #  OBLIGATOIREMENT ici
+├── Dolphin_Multi_Instance.bat     #  OBLIGATOIREMENT ici (lanceur manuel de multiple instances)
 ├── User\           # Instance 0 (base)
 ├── User1\          # Instance 1 (auto-créé)
 ├── User2\          # Instance 2 (auto-créé)
-└── launch_dolphin_instances.ps1
+└── ...
+```
+
+> **⚠️ Important :** Les fichiers `launch_dolphin_instances.ps1` et `Dolphin_Multi_Instance.bat` **doivent être placés dans le répertoire Dolphin** (à côté de `Dolphin.exe`). Le script auto-détecte le chemin de Dolphin depuis sa propre position. Si ces fichiers sont ailleurs, passe `--dolphin-path` explicitement.
+
+La ROM (`.rvz`, `.iso`, `.wbfs`) est auto-détectée en cherchant dans les dossiers `Jeux/`, `Games/` ou `ROMs/` **à côté** du répertoire Dolphin. Exemple de structure :
+```
+MonSetup\
+├── Dolphin-x64\              # Contient Dolphin.exe + scripts
+│   ├── Dolphin.exe
+│   ├── launch_dolphin_instances.ps1
+│   ├── Dolphin_Multi_Instance.bat
+│   └── User\
+└── Jeux\                      # Dossier ROM (à côté du dossier Dolphin)
+    └── MHtri\
+        └── MonsterHunterTri.rvz
+```
+
+Pour forcer un chemin ROM spécifique :
+```bash
+python train.py --rom-path "D:\Jeux\MonsterHunterTri.rvz" --num-instances 6
 ```
 
 ---
@@ -707,13 +805,14 @@ python train.py --resume ./models/mon_premier_run/checkpoint_50000_steps.zip --t
 | `--rtminimap` | off      | Afficher la minimap d'exploration en temps réel (nécessite `--rtvision`)  |
 
 #### Têtes d'action
-| Argument                   | Défaut   | Description                                                                                                                                                                                                                                                                                |
-|----------------------------|----------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `--disabled-heads HEAD...` | `menu`   | Liste de têtes à désactiver (séparées par des espaces). Passer sans argument pour tout activer. Valeurs valides : `movement`, `camera`, `combat`, `use_item`, `select_item`, `menu`, `sprint`. **La tête `menu` est désactivée par défaut** pour améliorer l'efficacité de l'entrainement. |
+| Argument                   | Défaut   | Description                                                                                                                                                                                                                                                                                      |
+|----------------------------|----------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `--disabled-heads HEAD...` | `menu`   | Liste de têtes à désactiver (séparées par des espaces). Passer sans argument pour tout activer. Valeurs valides : `movement`, `camera`, `combat`, `use_item`, `select_item`, `menu`, `sprint`. **La tête `menu` est désactivée par défaut** pour éviter que l'agent reste bloqué dans les menus. |
+| `--no-transformer-heads`   | off      | Désactiver la cross-attention Transformer entre les 7 têtes d'action. Revient aux têtes indépendantes (défaut SB3). Utile pour les petites expériences ou pour reprendre d'anciens checkpoints entraînés sans Transformer.                                                                       |
 
 Exemples :
 ```bash
-# Défaut : menu désactivé
+# Défaut : menu désactivé, Transformer actif
 python train.py
 
 # Désactiver menu ET use_item
@@ -721,7 +820,17 @@ python train.py --disabled-heads menu use_item
 
 # Activer TOUTES les têtes (menu inclus)
 python train.py --disabled-heads
+
+# Utiliser des têtes linéaires standard au lieu du Transformer
+python train.py --no-transformer-heads
 ```
+
+#### Dolphin
+| Argument                    | Défaut | Description                                                                                                                                                           |
+|-----------------------------|--------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `--dolphin-path PATH`       | auto   | Chemin vers `Dolphin.exe` ou son dossier parent. Auto-détecté depuis les emplacements courants, puis sauvegardé dans `config/dolphin_path_config.json`.               |
+| `--rom-path PATH`           | auto   | Chemin vers la ROM Monster Hunter Tri (`.rvz`, `.iso`, `.wbfs`). Auto-détecté depuis les dossiers `Jeux/`, `Games/` ou `ROMs/` à côté du répertoire Dolphin.          |
+| `--dolphin-timeout SECONDS` | `60`   | Timeout pour la détection des fenêtres Dolphin après le lancement                                                                                                     |
 
 #### Multi-agent / Multi-instance
 | Argument                    | Défaut                 | Description                                                                                                                                                                                                                                             |
@@ -729,14 +838,12 @@ python train.py --disabled-heads
 | `--num-agents N`            | idem `--num-instances` | Nombre d'agents PPO indépendants (1–10, ou jusqu'à 32 avec `--nolimit`)                                                                                                                                                                                 |
 | `--num-instances N`         | `1`                    | Nombre d'instances Dolphin à lancer (1–10, ou jusqu'à 16 avec `--nolimit`)                                                                                                                                                                              |
 | `--nolimit`                 | off                    | **Désactiver la limite de sécurité de 10 agents / 10 instances.** Cette limite existe pour éviter de bloquer accidentellement le PC. Avec `--nolimit`, tu peux aller jusqu'à 32 agents / 16 instances. Une invite de confirmation s'affiche quand même. |
-| `--dolphin-path PATH`       | auto                   | Chemin vers `Dolphin.exe` ou son dossier parent (sauvegardé après le premier run)                                                                                                                                                                       |
-| `--multi-agent-mode MODE`   | `independent`          | `independent`, `round_robin`, `majority_vote`, `genetic`                                                                                                                                                                                                |
+| `--multi-agent-mode MODE`   | `independent`          | `independent`, `round_robin`, `majority_vote`, `weighted`, `genetic`                                                                                                                                                                                    |
 | `--allocation-mode MODE`    | `auto`                 | `auto`, `manual`, `weighted`                                                                                                                                                                                                                            |
 | `--allocation-map MAP`      | —                      | Mapping manuel, ex. `"0:0,1;1:2,3"`                                                                                                                                                                                                                     |
 | `--steps-per-agent N`       | `4096`                 | Steps de rollout collectés par agent avant chaque update PPO                                                                                                                                                                                            |
 | `--block-size N`            | `100`                  | Steps par agent par bloc en mode `round_robin`                                                                                                                                                                                                          |
 | `--weighted-eval-freq N`    | `100`                  | Épisodes entre deux réévaluations de l'allocation en mode `weighted`                                                                                                                                                                                    |
-| `--dolphin-timeout SECONDS` | `60`                   | Timeout pour la détection des fenêtres Dolphin                                                                                                                                                                                                          |
 | `--genetic-generations N`   | `10`                   | Nombre de générations (mode génétique)                                                                                                                                                                                                                  |
 | `--genetic-elite-ratio R`   | `0.25`                 | Fraction d'agents conservés comme élites (mode génétique)                                                                                                                                                                                               |
 | `--genetic-mutation-rate R` | `0.3`                  | Taux de mutation (mode génétique)                                                                                                                                                                                                                       |
@@ -751,8 +858,7 @@ python train.py --disabled-heads
 | Argument          | Défaut   | Description                                                          |
 |-------------------|----------|----------------------------------------------------------------------|
 | `--debug-steps N` | —        | Remplacer `--timesteps` par une petite valeur pour tester rapidement |
-| `--small-rollout` | off      | Utiliser `n_steps=256` (rollouts courts, pour le debug)              |
-| `--log-memory`    | off      | Logger périodiquement les vecteurs mémoire dans la console           |
+| `--small-rollout` | off      | Utiliser `n_steps=512` (rollouts courts, pour le debug)              |
 
 ---
 
@@ -764,7 +870,7 @@ python train.py --disabled-heads
 ### Logs et Modèles
 
 ```
-logs/<expérience>/<timestamp>/
+logs/<expérience>/<horodatage>/
 ├── agent_0/
 │   ├── env_0/
 │   │   ├── console.log         # Tous les logs modules (DEBUG+)
@@ -773,7 +879,7 @@ logs/<expérience>/<timestamp>/
 │   ├── errors.log              # ERROR+ avec tracebacks complets
 │   └── session_summary.json    # Statistiques du run
 
-models/<expérience>/
+models/<expérience>/<horodatage>/
 ├── checkpoint_NNNNN_steps.zip  # Checkpoints périodiques (~tous les 10%)
 └── final_model.zip             # Modèle final
 ```
@@ -819,7 +925,7 @@ TimeoutError: Mémoire partagée 'DolphinInputHook_SharedMem_XXXX' non disponibl
 ```bash
 python train.py --grayscale              # 1 canal au lieu de 3 par frame
 python train.py --cpu                    # Forcer CPU (plus lent)
-python train.py --small-rollout          # n_steps=256, batch_size=64
+python train.py --small-rollout          # n_steps=512, batch_size=64
 ```
 
 ### Multi-Instance : Mauvaise Fenêtre Capturée
@@ -849,7 +955,7 @@ Les contributions sont bienvenues !
 
 ### Domaines de Contribution
 - **Traduction** — convertir les commentaires français en anglais
-- **Adresses mémoire** — trouver les adresses manquantes (ID arme, HP grand monstre)
+- **Adresses mémoire** — trouver les adresses manquantes (ID arme, armures)
 - **Réglage des récompenses** — améliorer la reward shaping pour un apprentissage plus rapide
 - **Nouvelles architectures CNN** — EfficientNet, ResNet, etc.
 - **Tests** — ajouter des tests unitaires pytest

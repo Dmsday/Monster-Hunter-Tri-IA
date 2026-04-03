@@ -226,60 +226,33 @@ class TrainingGUI:
             self.window = None
 
     def _on_stop_click(self):
-        """Release controller inputs then signal stop via should_stop() flag."""
+        """
+        Signal stop via should_stop() flag only.
+
+        Do NOT kill Dolphin here. The training loop detects should_stop() via
+        the callback, exits cleanly, then runner._final_cleanup() suppresses
+        capture-thread logging BEFORE closing Dolphin. Killing Dolphin here
+        would cause all capture threads to spam 'window closed' warnings because
+        their _shutdown flag has not been raised yet.
+        """
         s = self._state
         if s.stop_requested:
             return
         s.stop_requested = True
-        logger.warning("Stop requested via GUI button")
-
-        # Release all controller inputs before stopping
-        env_ref = getattr(self, '_env_ref', None)
-        if env_ref is not None:
-            try:
-                if hasattr(env_ref, 'envs'):
-                    for _e in env_ref.envs:
-                        _ctrl = getattr(_e, 'controller', None)
-                        if _ctrl and hasattr(_ctrl, 'reset_all'):
-                            _ctrl.reset_all()
-                elif hasattr(env_ref, 'controller'):
-                    _ctrl = getattr(env_ref, 'controller', None)
-                    if _ctrl and hasattr(_ctrl, 'reset_all'):
-                        _ctrl.reset_all()
-                logger.debug("All controller inputs released before stop")
-            except Exception as _re:
-                logger.debug(f"Could not release inputs on stop: {_re}")
+        logger.warning("GUI stop button pressed — signalling training loop to stop")
 
         if self._header and self._header.stop_button:
             try:
                 self._header.stop_button.configure(
                     text="⏳  STOPPING…", state="disabled",
                     bg="#2a1a00", fg=C.ORANGE)
-            except Exception:
-                pass
+            except tk.TclError as _btn_err:
+                logger.debug(f"Could not update stop button appearance: {_btn_err}")
 
         if self._statusbar:
             self._statusbar.set_status(
-                "Stop requested — releasing inputs and saving…", C.YELLOW)
-
-        # Close Dolphin instances via stored PID ref
-        dolphin_pids = getattr(self, '_dolphin_pids_ref', [])
-        if dolphin_pids:
-            try:
-                import psutil
-                for _pid in list(dolphin_pids):
-                    if _pid is None or _pid <= 0:
-                        continue
-                    try:
-                        if psutil.pid_exists(_pid):
-                            psutil.Process(_pid).terminate()
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        pass
-                logger.debug(f"GUI stop: terminated {len(dolphin_pids)} Dolphin(s)")
-            except Exception as _dol_err:
-                logger.debug(f"GUI stop: Dolphin cleanup error: {_dol_err}")
-
-        logger.debug("GUI stop: training will stop cleanly via should_stop()")
+                "Stop requested — waiting for training loop to finish cleanly…",
+                C.YELLOW)
 
     def _destroy_window(self):
         try:

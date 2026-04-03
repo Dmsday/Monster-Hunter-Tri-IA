@@ -179,8 +179,26 @@ NOITEM_SLOT_23 = (0x900E066A, 0x9014AE12)  # int2 (2 bytes) - Quantity in slot 2
 ID_SLOT_24 = (0x900E066C, 0x9014AE14)  # int2 (2 bytes) - Item ID in slot 24
 NOITEM_SLOT_24 = (0x900E066E, 0x9014AE16)  # int2 (2 bytes) - Quantity in slot 24
 
-# Currently Equipped Weapon
-WEAPON_EQUIPED = None  # To find - equipped weapon identifier
+
+# ─── Equipment BOX (storage, accessible from village) ────────────────────────
+# Addresses revealed by Gecko cheat codes
+# These are the STORAGE addresses (coffre), NOT the quest-equipped state.
+# Weapon category codes: 7=GS, 8=SNS, 9=Hammer, 10=Lance, (others TBD)
+EQUIP_BOX_WEAPON_SLOT    = 0x900E3650  # int2 → weapon category in box (7=GS, 8=SNS...)
+EQUIP_BOX_ARMOR_HEAD     = 0x900E137C  # armor box slot - head
+EQUIP_BOX_ARMOR_CHEST    = 0x900E1994  # armor box slot - chest
+EQUIP_BOX_ARMOR_ARMS     = 0x900E1F64  # armor box slot - arms
+EQUIP_BOX_ARMOR_WAIST    = 0x900E2540  # armor box slot - waist
+EQUIP_BOX_ARMOR_LEGS     = 0x900E2B10  # armor box slot - legs
+EQUIP_BOX_ARMOR_TALISMAN = 0x900E31A0  # armor box slot - talisman
+
+
+# ─── Equipped weapon DURING quest ────────────────────────────────────────────
+# The box address changes when you switch loadout but the equipped state
+# during quest is tracked separately near the player data area (0x9014AE..)
+WEAPON_EQUIPPED_TYPE = None  # int2 — weapon category (7=GS, 8=SNS, 9=Hammer, 10=Lance...)
+WEAPON_EQUIPPED_ID   = None  # int2 — specific weapon ID (cross-ref with weapon_id.txt)
+
 
 # =============================================================================
 # CATEGORY 4: QUEST & MONSTERS
@@ -189,10 +207,6 @@ WEAPON_EQUIPED = None  # To find - equipped weapon identifier
 # Quest Elements
 QUEST_TIME_SPENT = 0x806C7CFC  # int4 (4 bytes) - Quest timer (raw value)
 # Formula: raw_value / 30 = remaining time in seconds
-
-# Small Monsters (minor enemies)
-SMONSTER_NUMBER = None  # To find - total count of small monsters in zone
-SMONSTER1_POSITION = None  # To find - position coordinates
 
 # Small Monster HP Values
 SMONSTER1_HP = 0x9014D710  # int4 (4 bytes) - Small monster 1 HP (raw value)
@@ -206,7 +220,16 @@ SMONSTER6_HP = None  # To find - More Small monster HP
 # Large Monsters (boss enemies, main hunt targets)
 NUMBER_OF_LMONSTER = None  # To find - number of large monsters in quest
 LMONSTER1_POS = None  # To find - large monster 1 position
-LMONSTER1_HP = None  # To find - large monster 1 HP
+
+# Large Monster — pointer chain discovered via Gecko code HP Display ASM analysis
+# Chain: *(0x9014807C) + 0x7A0 = current HP (int4), + 0x7A4 = max HP (int4)
+LMONSTER1_POINTER_BASE = 0x9014807C   # int4 pointer → large monster struct base
+LMONSTER1_HP_CURRENT_OFFSET = 0x7A0   # offset from base → current HP (int4)
+LMONSTER1_HP_MAX_OFFSET     = 0x7A4   # offset from base → max HP (int4)
+
+# Always None: no static address exists, always resolved via pointer chain in read_value()
+LMONSTER1_HP     = None
+LMONSTER1_HP_MAX = None
 
 
 # =============================================================================

@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Launch multiple Dolphin instances with automatic window renaming
@@ -47,9 +47,14 @@ if ([string]::IsNullOrEmpty($DolphinExePath)) {
     elseif (Test-Path "$ScriptDir\..\Dolphin.exe") {
         $DolphinExePath = Resolve-Path "$ScriptDir\..\Dolphin.exe"
     }
-    # Fallback to hardcoded (for backward compatibility)
+    # No hardcoded fallback — fail with clear error instead
     else {
-        $DolphinExePath = "C:\Users\rocca\Desktop\MonsterHunter\Emulateur\IA_jeux\Dolphin-x64\Dolphin.exe"
+        Write-Host "ERROR: Dolphin.exe not found relative to script directory: $ScriptDir" -ForegroundColor Red
+        Write-Host "  Searched:" -ForegroundColor Yellow
+        Write-Host "    - $ScriptDir\Dolphin.exe" -ForegroundColor Yellow
+        Write-Host "    - $(Split-Path -Parent $ScriptDir)\Dolphin.exe" -ForegroundColor Yellow
+        Write-Host "  SOLUTION: Place this script in the Dolphin directory, or pass -DolphinExePath" -ForegroundColor Yellow
+        exit 1
     }
 }
 
@@ -114,18 +119,49 @@ if (-not [string]::IsNullOrEmpty($UserFolderPath)) {
 }
 
 if ([string]::IsNullOrEmpty($RomFilePath)) {
-    # Try to find ROM in common locations
-    $PossibleRomPaths = @(
-        "C:\Users\rocca\Desktop\MonsterHunter\Emulateur\Jeux\MHtri\MonsterHunterTri.rvz",
-        "$UserFolderPath\..\Jeux\MHtri\MonsterHunterTri.rvz",
-        "$UserFolderPath\Games\MonsterHunterTri.rvz"
-    )
+    # Auto-detect ROM relative to Dolphin directory (portable — no hardcoded paths)
+    # Search at multiple ancestor levels to handle various folder structures:
+    #   Dolphin-x64\Dolphin.exe          → parent = folder containing Dolphin-x64
+    #   IA_jeux\Dolphin-x64\Dolphin.exe  → grandparent = folder containing IA_jeux
+    #   Emulateur\IA_jeux\Dolphin-x64\   → great-grandparent, etc.
+    $DolphinDir = Split-Path -Parent $DolphinExePath
+    $Parent1 = Split-Path -Parent $DolphinDir            # e.g. IA_jeux
+    $Parent2 = Split-Path -Parent $Parent1                # e.g. Emulateur
+    $Parent3 = Split-Path -Parent $Parent2                # e.g. MonsterHunter
     
-    foreach ($Path in $PossibleRomPaths) {
-        if (Test-Path $Path) {
-            $RomFilePath = $Path
-            break
+    $SearchRoots = @(
+        (Join-Path $Parent1 "Jeux"),   (Join-Path $Parent1 "Games"),   (Join-Path $Parent1 "ROMs"),
+        (Join-Path $Parent2 "Jeux"),   (Join-Path $Parent2 "Games"),   (Join-Path $Parent2 "ROMs"),
+        (Join-Path $Parent3 "Jeux"),   (Join-Path $Parent3 "Games"),   (Join-Path $Parent3 "ROMs"),
+        (Join-Path $DolphinDir "Games"), (Join-Path $DolphinDir "ROMs")
+    )
+    # Remove duplicates and empty paths
+    $SearchRoots = $SearchRoots | Where-Object { -not [string]::IsNullOrEmpty($_) } | Select-Object -Unique
+    
+    $RomExtensions = @("*.rvz", "*.iso", "*.wbfs", "*.gcm")
+    
+    :romSearch foreach ($root in $SearchRoots) {
+        if (-not (Test-Path $root -PathType Container)) { continue }
+        foreach ($ext in $RomExtensions) {
+            $found = Get-ChildItem -Path $root -Filter $ext -Recurse -ErrorAction SilentlyContinue |
+                     Where-Object { $_.Name -match "(?i)monster.*hunter|mhtri|RMHP" } |
+                     Select-Object -First 1
+            if ($null -ne $found) {
+                $RomFilePath = $found.FullName
+                Write-Host "ROM auto-detected: $RomFilePath" -ForegroundColor Green
+                break romSearch
+            }
         }
+    }
+    
+    if ([string]::IsNullOrEmpty($RomFilePath)) {
+        Write-Host "WARNING: Monster Hunter Tri ROM not found by auto-detection" -ForegroundColor Yellow
+        Write-Host "  Searched in:" -ForegroundColor Yellow
+        foreach ($root in $SearchRoots) {
+            Write-Host "    - $root" -ForegroundColor Yellow
+        }
+        Write-Host "  HINT: Pass -RomFilePath or place the ROM in a 'Jeux' or 'Games' folder" -ForegroundColor Yellow
+        Write-Host "        near the Dolphin directory" -ForegroundColor Yellow
     }
 }
 
@@ -204,7 +240,10 @@ if (-not (Test-Path $Config.UserFolder -PathType Container)) {
     $ValidationErrors += "User Folder NOT FOUND: $($Config.UserFolder)"
 }
 
-if (-not (Test-Path $Config.RomPath)) {
+if ([string]::IsNullOrEmpty($Config.RomPath)) {
+    $ValidationErrors += "ROM File NOT SET: auto-detection failed. Pass -RomFilePath explicitly."
+}
+elseif (-not (Test-Path $Config.RomPath)) {
     $ValidationErrors += "ROM File NOT FOUND: $($Config.RomPath)"
 }
 
@@ -385,7 +424,10 @@ function Test-Prerequisites {
     }
     
     # Validate ROM file exists (file)
-    if (-not (Test-Path $Config.RomPath -PathType Leaf)) {
+    if ([string]::IsNullOrEmpty($Config.RomPath)) {
+        $errors += "ROM non configuree : lancez avec -RomFilePath ou placez la ROM dans un dossier 'Jeux' ou 'Games'"
+    }
+    elseif (-not (Test-Path $Config.RomPath -PathType Leaf)) {
         $errors += "ROM introuvable : $($Config.RomPath)"
     }
     
@@ -394,7 +436,7 @@ function Test-Prerequisites {
     $errorMessage += "`n`nDEBUG INFO:`n"
     $errorMessage += "DolphinPath exists: $(Test-Path $Config.DolphinPath -PathType Leaf)`n"
     $errorMessage += "UserFolder exists: $(Test-Path $Config.UserFolder -PathType Container)`n"
-    $errorMessage += "RomPath exists: $(Test-Path $Config.RomPath -PathType Leaf)`n"
+    $errorMessage += "RomPath: $(if ([string]::IsNullOrEmpty($Config.RomPath)) { '(empty)' } else { $Config.RomPath })`n"
     
     [System.Windows.Forms.MessageBox]::Show(
         $errorMessage,
@@ -698,8 +740,19 @@ function Start-DolphinInstance {
         }
 
         # IMPORTANT: Set WorkingDirectory to Dolphin folder to avoid relative path issues
+        # NOTE: Start-Process -ArgumentList with an array silently joins elements
+        #       with spaces, breaking paths that contain spaces.
+        #       Use a single quoted string with explicit quoting instead.
+        if ([string]::IsNullOrEmpty($Config.RomPath)) {
+            $quotedArgs = "--user `"$UserFolderAbsolutePath`""
+        }
+        else {
+            $quotedArgs = "--user `"$UserFolderAbsolutePath`" `"$($Config.RomPath)`""
+        }
+        Write-Host "  DEBUG: Dolphin launch args: $quotedArgs" -ForegroundColor DarkGray
+
         $process = Start-Process -FilePath $Config.DolphinPath `
-                 -ArgumentList @('--user', $UserFolderAbsolutePath, $Config.RomPath) `
+                 -ArgumentList $quotedArgs `
                  -WorkingDirectory $DolphinDir `
                  -PassThru `
                  -ErrorAction Stop
@@ -1098,9 +1151,9 @@ if ($options.CopyConfig) {
 }
 
 # ==============================================================================
-# ENABLE BACKGROUND INPUT FOR ALL INSTANCES
+# CONFIGURE DOLPHIN INI FOR ALL INSTANCES (GFX + Audio)
 # ==============================================================================
-Write-Host "`nConfiguring Background Input for multi-instance..." -ForegroundColor Cyan
+Write-Host "`nConfiguring Dolphin instances (GFX + audio)..." -ForegroundColor Cyan
 
 $DolphinDir = Split-Path -Parent $Config.DolphinPath
 
@@ -1126,60 +1179,9 @@ for ($i = 0; $i -lt $options.Count; $i++) {
     }
     
     # Read existing INI content or create empty array
-    $IniContent = @()
-    if (Test-Path $DolphinIniPath) {
-        $IniContent = Get-Content $DolphinIniPath -Encoding UTF8
-    }
-    
-    # Check if [Input] section exists
-    $HasInputSection = $false
     $ModifiedContent = @()
-    $InsideInputSection = $false
-    $BackgroundInputFound = $false
-    
-    foreach ($line in $IniContent) {
-        # Detect [Input] section
-        if ($line -match '^\[Input\]') {
-            $HasInputSection = $true
-            $InsideInputSection = $true
-            $ModifiedContent += $line
-            continue
-        }
-        
-        # Detect next section (end of [Input])
-        if ($line -match '^\[.*\]' -and $InsideInputSection) {
-            # Insert BackgroundInput before next section if not found
-            if (-not $BackgroundInputFound) {
-                $ModifiedContent += "BackgroundInput = True"
-            }
-            $InsideInputSection = $false
-        }
-        
-        # Skip existing BackgroundInput line (we'll add our own)
-        if ($line -match '^BackgroundInput\s*=') {
-            $BackgroundInputFound = $true
-            $ModifiedContent += "BackgroundInput = True"
-            continue
-        }
-        
-        $ModifiedContent += $line
-    }
-    
-    # If [Input] section exists but BackgroundInput not added yet
-    if ($HasInputSection -and $InsideInputSection -and -not $BackgroundInputFound) {
-        $ModifiedContent += "BackgroundInput = True"
-    }
-    
-    # If no [Input] section exists, add it at the end
-    if (-not $HasInputSection) {
-        $ModifiedContent += ""
-        $ModifiedContent += "[Input]"
-        $ModifiedContent += "BackgroundInput = True"
-        Write-Host "  Instance $i : Created [Input] section" -ForegroundColor Green
-    }
-    else {
-        # Input section already exists, BackgroundInput was updated
-        Write-Host "  Instance $i : Updated [Input] section" -ForegroundColor Green
+    if (Test-Path $DolphinIniPath) {
+        $ModifiedContent = Get-Content $DolphinIniPath -Encoding UTF8
     }
 
     # Also configure Graphics settings to render even when minimized
@@ -1335,14 +1337,14 @@ for ($i = 0; $i -lt $options.Count; $i++) {
     try {
         $Utf8NoBom = New-Object System.Text.UTF8Encoding $false
         [System.IO.File]::WriteAllLines($DolphinIniPath, $ModifiedContent, $Utf8NoBom)
-        Write-Host "  Instance $i : Background Input enabled + audio muted (No audio backend)" -ForegroundColor Green
+        Write-Host "  Instance $i : Audio muted (No audio backend)" -ForegroundColor Green
     }
     catch {
         Write-Host "  Instance $i : ERROR writing Dolphin.ini: $_" -ForegroundColor Red
     }
 }
 
-Write-Host "Background Input configuration complete" -ForegroundColor Green
+Write-Host "Dolphin INI configuration complete" -ForegroundColor Green
 Write-Host ""
 
 # Launch instances quickly
@@ -1468,31 +1470,64 @@ Write-Host ""
 # Dolphin re-creates them during initialization even after pre-launch cleanup.
 # We clean them again here, after window detection confirms Dolphin is fully ready.
 # ============================================================
+Write-Host "Waiting for Dolphin to finish initializing before GBA cleanup..." -ForegroundColor Cyan
+Start-Sleep -Seconds 6
+
 Write-Host "Cleaning up GBA folders created by Dolphin initialization..." -ForegroundColor Cyan
 $DolphinDirClean = Split-Path -Parent $Config.DolphinPath
 
 for ($i = 0; $i -lt $options.Count; $i++) {
     $UserFolderName = if ($i -eq 0) { "User" } else { "User$i" }
     $UserFolderPath = Join-Path $DolphinDirClean $UserFolderName
-    $GbaFolder = Join-Path $UserFolderPath "GBA"
+    $GbaFolder      = Join-Path $UserFolderPath "GBA"
 
-    if (Test-Path $GbaFolder -PathType Container) {
-        try {
-            # Only remove if folder contains no actual GBA save files
-            $GbaFiles = Get-ChildItem -Path $GbaFolder -Recurse -File -ErrorAction SilentlyContinue
-            if ($GbaFiles.Count -eq 0) {
-                Remove-Item -Path $GbaFolder -Recurse -Force -ErrorAction SilentlyContinue
-                Write-Host "  Instance $i ($UserFolderName) : GBA folder removed" -ForegroundColor DarkGray
-            } else {
-                Write-Host "  Instance $i ($UserFolderName) : GBA folder kept (contains $($GbaFiles.Count) file(s))" -ForegroundColor DarkGray
-            }
-        } catch {
-            Write-Host "  Instance $i : Could not remove GBA folder: $_" -ForegroundColor Yellow
-        }
+    if (-not (Test-Path $GbaFolder -PathType Container)) { continue }
+
+    $GbaFiles = Get-ChildItem -Path $GbaFolder -Recurse -File -ErrorAction SilentlyContinue
+    if ($GbaFiles.Count -gt 0) {
+        Write-Host "  Instance $i ($UserFolderName): GBA has $($GbaFiles.Count) file(s) — kept" -ForegroundColor DarkGray
+        continue
+    }
+
+    # First attempt
+    Remove-Item -Path $GbaFolder -Recurse -Force -ErrorAction SilentlyContinue
+
+    if (Test-Path $GbaFolder) {
+        # Second attempt after short wait (folder was still locked by Dolphin)
+        Start-Sleep -Seconds 3
+        Remove-Item -Path $GbaFolder -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    if (Test-Path $GbaFolder) {
+        Write-Host "  Instance $i ($UserFolderName): GBA folder still locked by Dolphin — will remain" -ForegroundColor Yellow
+    } else {
+        Write-Host "  Instance $i ($UserFolderName): GBA folder removed" -ForegroundColor DarkGray
     }
 }
 Write-Host "GBA cleanup complete" -ForegroundColor Green
 Write-Host ""
+
+# ============================================================
+# CLEANUP: Remove phantom "Monster Hunter" folder on Desktop
+# Dolphin sometimes creates a GBA/Saves directory tree at an old/stale path
+# stored in its config files (especially after folder renames).
+# This step removes ONLY empty phantom directory trees on the Desktop.
+# ============================================================
+$DesktopPhantom = Join-Path $env:USERPROFILE "Desktop\Monster Hunter"
+if (Test-Path $DesktopPhantom -PathType Container) {
+    # Safety check: only remove if the folder tree is entirely empty (no real files)
+    $PhantomFiles = Get-ChildItem -Path $DesktopPhantom -Recurse -File -ErrorAction SilentlyContinue
+    if ($PhantomFiles.Count -eq 0) {
+        Remove-Item -Path $DesktopPhantom -Recurse -Force -ErrorAction SilentlyContinue
+        if (-not (Test-Path $DesktopPhantom)) {
+            Write-Host "Cleaned up phantom 'Monster Hunter' folder from Desktop" -ForegroundColor DarkGray
+        } else {
+            Write-Host "WARNING: Could not remove phantom 'Monster Hunter' folder from Desktop (locked)" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "NOTE: 'Monster Hunter' folder on Desktop contains files — not removed" -ForegroundColor DarkGray
+    }
+}
 
 # MODE INTERACTIF : Afficher panneau de controle
 if (-not $NoGUI) {

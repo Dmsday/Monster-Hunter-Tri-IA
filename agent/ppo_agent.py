@@ -1,6 +1,7 @@
 """
 PPO agent with Vision + Memory support
 Uses Stable-Baselines3 with custom feature extractor
+Optionally uses Transformer-based action heads for cross-head coordination
 """
 
 import gymnasium as gym
@@ -8,50 +9,59 @@ import numpy as np
 from stable_baselines3 import PPO
 
 from agent.extractors import CustomCombinedExtractor, CustomVisionExtractor
+from agent.transformer_heads import get_transformer_policy_class
+# Lazy init: SB3 is imported only when the class is first accessed
+TransformerMultiInputPolicy = get_transformer_policy_class()
+
 from info.module_logger import get_module_logger
-from core.controller.action_heads import ACTION_BRANCHES
 
 logger = get_module_logger('ppo_agent') # Logs per level
 
 
 def create_ppo_agent(
         environment_new,
-        learning_rate: float = 3e-4, # Faster initial convergence for 28K action combos
+        learning_rate: float = 3e-4,
         n_steps: int = 4096,
         batch_size: int = 512,
         n_epochs: int = 4,
         gamma: float = 0.995,
         gae_lambda: float = 0.95,
         clip_range: float = 0.2,
-        ent_coef: float = 0.03, # Higher entropy for 7-head MultiDiscrete (28K combos), prevents early convergence to NOOP
+        ent_coef: float = 0.03,
         vf_coef: float = 0.5,
         max_grad_norm: float = 0.5,
         features_dim: int = 256,
         cnn_type: str = 'nature',
         device: str = 'auto',
         verbose: int = 1,
-        tensorboard_log: str = None
+        tensorboard_log: str = None,
+        use_transformer_heads: bool = True,
+        transformer_kwargs: dict = None,
 ):
     """
-    Crée un agent PPO configuré pour Monster Hunter
+    Create a PPO agent configured for Monster Hunter
 
     Args:
-        environment_new: Environnement Gym
-        learning_rate: Taux d'apprentissage
-        n_steps: Steps par rollout
-        batch_size: Taille des batches
-        n_epochs: Epochs d'optimisation par update
-        gamma: Facteur de discount
-        gae_lambda: Lambda pour GAE
-        clip_range: Clip range pour PPO
-        ent_coef: Coefficient d'entropie
-        vf_coef: Coefficient value function
-        max_grad_norm: Gradient clipping
-        features_dim: Dimension des features
-        cnn_type: Type de CNN ('nature', 'impala', 'minigrid')
+        environment_new: Gym Environment
+        learning_rate: Learning Rate
+        n_steps: Steps per rollout
+        batch_size: Batch Size
+        n_epochs: Optimization Epochs per update
+        gamma: Discount Factor
+        gae_lambda: Lambda for GAE
+        clip_range: Clip Range for PPO
+        ent_coef: Entropy Coefficient
+        vf_coef: Coefficient Value Function
+        max_grad_norm: Gradient Clipping
+        features_dim: Feature Dimensions
+        cnn_type: CNN Type ('nature', 'impala', 'minigrid')
         device: Device ('auto', 'cuda', 'cpu')
-        verbose: Niveau de verbosité
-        tensorboard_log: Path pour logs TensorBoard
+        verbose: Verbosity Level
+        tensorboard_log: Path for TensorBoard Logs
+        use_transformer_heads: Use Transformer cross-attention between action heads
+            instead of independent Linear layers (default: True)
+        transformer_kwargs: Config dict for TransformerActionHead
+            (d_head, n_layers, n_attn_heads). None uses defaults.
 
     Returns:
         PPO agent
@@ -86,9 +96,25 @@ def create_ppo_agent(
             net_arch=dict(pi=[128, 128], vf=[128, 128])
         )
 
-    # Créer l'agent PPO
+    # --- Create PPO agent ---
+    # Select policy class — Transformer heads enabled by default for Dict obs
+    if use_transformer_heads and isinstance(obs_space, gym.spaces.Dict):
+        if TransformerMultiInputPolicy is not None:
+            policy_class = TransformerMultiInputPolicy
+            policy_kwargs['transformer_kwargs'] = transformer_kwargs or {
+                'd_head': 48, 'n_layers': 2, 'n_attn_heads': 4,
+            }
+            logger.info("Using TransformerMultiInputPolicy (cross-attention action heads)")
+        else:
+            logger.warning("TransformerMultiInputPolicy not available, falling back to standard")
+            policy_class = 'MultiInputPolicy'
+    elif isinstance(obs_space, gym.spaces.Dict):
+        policy_class = 'MultiInputPolicy'
+    else:
+        policy_class = 'MlpPolicy'
+
     new_agent = PPO(
-        policy='MultiInputPolicy' if isinstance(obs_space, gym.spaces.Dict) else 'MlpPolicy',
+        policy=policy_class,
         env=environment_new,
         learning_rate=learning_rate,
         n_steps=n_steps,
@@ -103,7 +129,7 @@ def create_ppo_agent(
         policy_kwargs=policy_kwargs,
         device=device,
         verbose=verbose,
-        tensorboard_log=tensorboard_log
+        tensorboard_log=tensorboard_log,
     )
 
     # Log des hyperparamètres
@@ -122,6 +148,7 @@ def create_ppo_agent(
         logger.info(f"   Features dim: {features_dim}")
         logger.info(f"   CNN type: {cnn_type}")
         logger.info(f"   Device: {device}")
+        logger.info(f"   Transformer heads: {use_transformer_heads}")
 
     return new_agent
 
@@ -160,10 +187,11 @@ if __name__ == "__main__":
             super().__init__()
             self.observation_space = DictSpace({
                 'visual': Box(0, 1, shape=(84, 84, 4), dtype=np.float32),
-                'memory': Box(0, 1, shape=(67,), dtype=np.float32),
-                'exploration_map': Box(-1, 1, shape=(15, 15, 3), dtype=np.float32)
+                'memory': Box(0, 1, shape=(70,), dtype=np.float32),  # matches MEMORY_VECTOR_SIZE
+                'exploration_map': Box(-1, 1, shape=(15, 15, 4), dtype=np.float32)
+                # 4ch: visits, player, recent, markers
             })
-            self.action_space = gym.spaces.Discrete(19)
+            self.action_space = gym.spaces.MultiDiscrete([5, 5, 5, 2, 3, 8, 2])
 
         def reset(self, seed=None, options=None):
             # Dict keys in alphabetical order
@@ -176,8 +204,8 @@ if __name__ == "__main__":
 
         def step(self, action_dummy):
             obs_step = {
-                'exploration_map': np.random.rand(15, 15, 3).astype(np.float32),
-                'memory': np.random.rand(67).astype(np.float32),
+                'exploration_map': np.random.rand(15, 15, 4).astype(np.float32),
+                'memory': np.random.rand(70).astype(np.float32),
                 'visual': np.random.rand(84, 84, 4).astype(np.float32),
             }
             return obs_step, 0.0, False, False, {}
@@ -202,7 +230,17 @@ if __name__ == "__main__":
     # Test predict
     obs, _ = env.reset()
     action, _ = agent.predict(obs, deterministic=True)
-    print(f"\n🎮 Test prediction:")
-    print(f"   Action: {action}")
+    head_names = ['move_x', 'move_y', 'combat', 'guard', 'menu', 'use_item', 'dodge']
+    print(f"\n🎮 Test prediction (7 heads):")
+    for i, (name, val) in enumerate(zip(head_names, action)):
+        print(f"   Head {i} ({name}): {val}")
+
+    # Verify Transformer is actually active
+    has_transformer = hasattr(agent.policy.action_net, 'attn_layers')
+    print(f"\n   Transformer action head active: {has_transformer}")
+    if has_transformer:
+        attn = agent.policy.action_net.get_head_attention_summary()
+        if attn is not None:
+            print(f"   Attention matrix shape: {attn.shape}")  # Expected: (7, 7)
 
     print("\n✅ Test réussi!")

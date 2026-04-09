@@ -1,349 +1,146 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    Launch multiple Dolphin instances with automatic window renaming
+    Launch multiple Dolphin instances with automatic window renaming, INI tweaks
+    and User-profile management.
+
 .DESCRIPTION
-    Optimized script to launch and manage multiple Dolphin instances
-    
-    IMPORTANT - Multi-instance setup:
-    This script uses Dolphin's User profiles (User, User1, User2, etc.)
-    You must create these profiles BEFORE running the script:
-    
-    1. Locate your Dolphin User folder:
-       - Portable: [Dolphin directory]\User
-       - Installed: C:\Users\[YourName]\Documents\Dolphin Emulator
-    
-    2. Create additional profiles:
-       - Copy the "User" folder
-       - Rename copies to: User1, User2, User3, etc.
-       - Each AI agent will use one profile
-    
-    3. Number of profiles needed = Number of instances
-       Example: 4 instances requires User, User1, User2, User3
+    Uses Dolphin's --user flag with sibling profiles (User, User1, User2, ...)
+    placed next to Dolphin.exe. Missing profiles are auto-created from "User".
+
+    Two modes:
+      * Interactive (default) : shows a small WinForms launcher + control panel.
+      * NoGUI                  : driven by Python (multi_agent_trainer), writes
+                                 PID files so Python can attach to each Dolphin.
 #>
 
 [CmdletBinding()]
 param(
-    [int]$NumInstances = 0,           # number of instances to launch
-    [switch]$NoGUI,                   # silent mode (no dialog)
-    [switch]$MinimizeDolphin = $false, # minimize Dolphin windows
-    [switch]$MinimizeGame = $false,    # minimize game windows
-    [string]$DolphinExePath = "",      # Path to Dolphin.exe (optional)
-    [string]$UserFolderPath = "",      # Path to User folder (optional)
-    [string]$RomFilePath = "",         # Path to ROM file (optional)
-    [string]$PidDirectory = ""         # Directory for PID files (for Python integration)
+    [int]$NumInstances     = 0,
+    [switch]$NoGUI,
+    [switch]$MinimizeDolphin = $false,
+    [switch]$MinimizeGame    = $false,
+    [string]$DolphinExePath  = "",
+    [string]$UserFolderPath  = "",
+    [string]$RomFilePath     = "",
+    [string]$PidDirectory    = ""
 )
 
-# Auto-detect paths if not provided
-if ([string]::IsNullOrEmpty($DolphinExePath)) {
-    # Try to find Dolphin.exe in script directory or parent
-    $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-    
-    # Check if Dolphin.exe is in same folder as script
-    if (Test-Path "$ScriptDir\Dolphin.exe") {
-        $DolphinExePath = "$ScriptDir\Dolphin.exe"
-    }
-    # Check parent folder
-    elseif (Test-Path "$ScriptDir\..\Dolphin.exe") {
-        $DolphinExePath = Resolve-Path "$ScriptDir\..\Dolphin.exe"
-    }
-    # No hardcoded fallback — fail with clear error instead
-    else {
-        Write-Host "ERROR: Dolphin.exe not found relative to script directory: $ScriptDir" -ForegroundColor Red
-        Write-Host "  Searched:" -ForegroundColor Yellow
-        Write-Host "    - $ScriptDir\Dolphin.exe" -ForegroundColor Yellow
-        Write-Host "    - $(Split-Path -Parent $ScriptDir)\Dolphin.exe" -ForegroundColor Yellow
-        Write-Host "  SOLUTION: Place this script in the Dolphin directory, or pass -DolphinExePath" -ForegroundColor Yellow
-        exit 1
-    }
-}
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version 2.0
 
-if ([string]::IsNullOrEmpty($UserFolderPath)) {
-    # Normalize DolphinExePath first (critical for Split-Path)
-    $DolphinExePath = [System.IO.Path]::GetFullPath($DolphinExePath)
-    
-    # Get directory from executable path
-    $DolphinDir = Split-Path -Parent $DolphinExePath
-    
-    # Normalize path (remove trailing slashes)
-    $DolphinDir = $DolphinDir.TrimEnd('\')
-    
-    # Debug output
-    Write-Host "DEBUG: DolphinExePath resolved to: $DolphinExePath" -ForegroundColor Cyan
-    Write-Host "DEBUG: DolphinDir extracted as: $DolphinDir" -ForegroundColor Cyan
-    
-    # Check for portable mode (User folder in Dolphin directory)
-    $PortableUserPath = Join-Path $DolphinDir "User"
-    Write-Host "DEBUG: Testing portable path: $PortableUserPath" -ForegroundColor Cyan
-    
-    if (Test-Path $PortableUserPath -PathType Container) {
-        $UserFolderPath = $PortableUserPath
-        Write-Host "Detected portable Dolphin User folder: $UserFolderPath" -ForegroundColor Green
+# ============================================================================
+# CONSTANTS
+# ============================================================================
+$Script:ScriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
+$Script:ConfigFile  = Join-Path $Script:ScriptDir "dolphin_launcher_config.json"
+$Script:RomPatterns = '(?i)monster.*hunter|mhtri|RMHP'
+$Script:RomExts     = @('*.rvz', '*.iso', '*.wbfs', '*.gcm')
+$Script:WindowTimeoutSec = 15
+$Script:InitialDelaySec  = 5
+$Script:WindowMatchPatterns = @('*Monster Hunter Tri*', '*RMHP*')
+$Script:DolphinMenuTitle    = 'Dolphin 2509'
+
+# ============================================================================
+# LOGGING HELPERS (single source of truth for output formatting)
+# ============================================================================
+function Write-Info  { param([string]$Msg) Write-Host $Msg -ForegroundColor Cyan }
+function Write-Ok    { param([string]$Msg) Write-Host $Msg -ForegroundColor Green }
+function Write-Warn2 { param([string]$Msg) Write-Host $Msg -ForegroundColor Yellow }
+function Write-Err   { param([string]$Msg) Write-Host $Msg -ForegroundColor Red }
+function Write-Dim   { param([string]$Msg) Write-Host $Msg -ForegroundColor DarkGray }
+
+# ============================================================================
+# CONFIG PERSISTENCE
+# ============================================================================
+function Get-SavedConfig {
+    if (-not (Test-Path $Script:ConfigFile)) { return $null }
+    try {
+        return Get-Content -Path $Script:ConfigFile -Raw | ConvertFrom-Json
     }
-    # Check for standard install (AppData)
-    else {
-        $AppDataUser = Join-Path $env:USERPROFILE "Documents\Dolphin Emulator"
-        if (Test-Path $AppDataUser -PathType Container) {
-            $UserFolderPath = $AppDataUser
-            Write-Host "Detected installed Dolphin User folder: $UserFolderPath" -ForegroundColor Green
-        }
-        else {
-            # CRITICAL ERROR : No valid User folder found
-            Write-Host "ERROR: Cannot find Dolphin User folder" -ForegroundColor Red
-            Write-Host "  Checked locations:" -ForegroundColor Yellow
-            Write-Host "    - Portable: $PortableUserPath" -ForegroundColor Yellow
-            Write-Host "    - AppData: $AppDataUser" -ForegroundColor Yellow
-            Write-Host "" -ForegroundColor Yellow
-            Write-Host "SOLUTION:" -ForegroundColor Yellow
-            Write-Host "  1. Launch Dolphin at least once to create User folder" -ForegroundColor Yellow
-            Write-Host "  2. Or provide explicit path:" -ForegroundColor Yellow
-            Write-Host "     -UserFolderPath 'C:\Path\To\Dolphin\User'" -ForegroundColor Yellow
-            exit 1
-        }
+    catch [System.Exception] {
+        Write-Warn2 "Failed to load saved config: $($_.Exception.Message)"
+        return $null
     }
 }
-
-# Additional validation
-if (-not [string]::IsNullOrEmpty($UserFolderPath)) {
-    # Normalize the detected path
-    $UserFolderPath = $UserFolderPath.TrimEnd('\')
-    
-    # Verify it actually exists
-    if (-not (Test-Path $UserFolderPath -PathType Container)) {
-        Write-Host "ERROR: User folder does not exist: $UserFolderPath" -ForegroundColor Red
-        Write-Host "SOLUTION:" -ForegroundColor Yellow
-        Write-Host "  1. Launch Dolphin to create the User folder" -ForegroundColor Yellow
-        Write-Host "  2. Or manually create User profiles (User, User1, User2...)" -ForegroundColor Yellow
-        exit 1  # ✅ FAIL INSTEAD OF AUTO-CREATE
-    }
-}
-
-if ([string]::IsNullOrEmpty($RomFilePath)) {
-    # Auto-detect ROM relative to Dolphin directory (portable — no hardcoded paths)
-    # Search at multiple ancestor levels to handle various folder structures:
-    #   Dolphin-x64\Dolphin.exe          → parent = folder containing Dolphin-x64
-    #   IA_jeux\Dolphin-x64\Dolphin.exe  → grandparent = folder containing IA_jeux
-    #   Emulateur\IA_jeux\Dolphin-x64\   → great-grandparent, etc.
-    $DolphinDir = Split-Path -Parent $DolphinExePath
-    $Parent1 = Split-Path -Parent $DolphinDir            # e.g. IA_jeux
-    $Parent2 = Split-Path -Parent $Parent1                # e.g. Emulateur
-    $Parent3 = Split-Path -Parent $Parent2                # e.g. MonsterHunter
-    
-    $SearchRoots = @(
-        (Join-Path $Parent1 "Jeux"),   (Join-Path $Parent1 "Games"),   (Join-Path $Parent1 "ROMs"),
-        (Join-Path $Parent2 "Jeux"),   (Join-Path $Parent2 "Games"),   (Join-Path $Parent2 "ROMs"),
-        (Join-Path $Parent3 "Jeux"),   (Join-Path $Parent3 "Games"),   (Join-Path $Parent3 "ROMs"),
-        (Join-Path $DolphinDir "Games"), (Join-Path $DolphinDir "ROMs")
-    )
-    # Remove duplicates and empty paths
-    $SearchRoots = $SearchRoots | Where-Object { -not [string]::IsNullOrEmpty($_) } | Select-Object -Unique
-    
-    $RomExtensions = @("*.rvz", "*.iso", "*.wbfs", "*.gcm")
-    
-    :romSearch foreach ($root in $SearchRoots) {
-        if (-not (Test-Path $root -PathType Container)) { continue }
-        foreach ($ext in $RomExtensions) {
-            $found = Get-ChildItem -Path $root -Filter $ext -Recurse -ErrorAction SilentlyContinue |
-                     Where-Object { $_.Name -match "(?i)monster.*hunter|mhtri|RMHP" } |
-                     Select-Object -First 1
-            if ($null -ne $found) {
-                $RomFilePath = $found.FullName
-                Write-Host "ROM auto-detected: $RomFilePath" -ForegroundColor Green
-                break romSearch
-            }
-        }
-    }
-    
-    if ([string]::IsNullOrEmpty($RomFilePath)) {
-        Write-Host "WARNING: Monster Hunter Tri ROM not found by auto-detection" -ForegroundColor Yellow
-        Write-Host "  Searched in:" -ForegroundColor Yellow
-        foreach ($root in $SearchRoots) {
-            Write-Host "    - $root" -ForegroundColor Yellow
-        }
-        Write-Host "  HINT: Pass -RomFilePath or place the ROM in a 'Jeux' or 'Games' folder" -ForegroundColor Yellow
-        Write-Host "        near the Dolphin directory" -ForegroundColor Yellow
-    }
-}
-
-# Configuration
-$Config = @{
-    DolphinPath = $DolphinExePath
-    UserFolder  = $UserFolderPath
-    RomPath     = $RomFilePath
-    InitialDelay = 2
-    WindowTimeout = 5
-}
-
-# ==============================================================================
-# DEBUG: Verify variables before validation
-# ==============================================================================
-Write-Host ""
-Write-Host "DEBUG: Pre-validation check" -ForegroundColor Magenta
-Write-Host "  DolphinExePath  = '$DolphinExePath'" -ForegroundColor Gray
-Write-Host "  UserFolderPath  = '$UserFolderPath'" -ForegroundColor Gray
-Write-Host "  RomFilePath     = '$RomFilePath'" -ForegroundColor Gray
-Write-Host "  Config.DolphinPath = '$($Config.DolphinPath)'" -ForegroundColor Gray
-Write-Host "  Config.UserFolder  = '$($Config.UserFolder)'" -ForegroundColor Gray
-Write-Host "  Config.RomPath     = '$($Config.RomPath)'" -ForegroundColor Gray
-Write-Host ""
-
-# ==============================================================================
-# PATH VALIDATION
-# ==============================================================================
-Write-Host "==================================================================" -ForegroundColor Cyan
-
-# ==============================================================================
-# CONFIGURATION PERSISTENCE (load saved config)
-# ==============================================================================
-# Save validated paths to local config file for future runs
-# Config file location: same directory as script
-
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$ConfigFile = Join-Path $ScriptDir "dolphin_launcher_config.json"
 
 function Save-LauncherConfig {
-    param(
-        [string]$DolphinPath,
-        [string]$UserFolder,
-        [string]$RomPath
-    )
-    
-    $configData = @{
+    param([string]$DolphinPath, [string]$UserFolder, [string]$RomPath)
+    $data = [ordered]@{
         DolphinExePath = $DolphinPath
         UserFolderPath = $UserFolder
-        RomFilePath = $RomPath
-        LastUpdated = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+        RomFilePath    = $RomPath
+        LastUpdated    = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
     }
-    
     try {
-        $configData | ConvertTo-Json | Set-Content -Path $ConfigFile -Encoding UTF8
-        Write-Host "Configuration saved to: $ConfigFile" -ForegroundColor Green
+        $data | ConvertTo-Json | Set-Content -Path $Script:ConfigFile -Encoding UTF8
+        Write-Ok "Configuration saved: $Script:ConfigFile"
     }
-    catch {
-        Write-Warning "Failed to save configuration: $_"
+    catch [System.Exception] {
+        Write-Warn2 "Failed to save config: $($_.Exception.Message)"
     }
 }
 
-# ==============================================================================
-# PATH VALIDATION - SILENT MODE FOR PYTHON
-# ==============================================================================
-# When called from Python with -NoGUI, validation must not block
-# Write minimal output and exit with error code only
+# ============================================================================
+# PATH RESOLUTION
+# ============================================================================
+function Resolve-DolphinExe {
+    param([string]$Hint)
+    if ($Hint) { return [System.IO.Path]::GetFullPath($Hint) }
 
-$ValidationErrors = @()
-
-if (-not (Test-Path $Config.DolphinPath)) {
-    $ValidationErrors += "Dolphin.exe NOT FOUND: $($Config.DolphinPath)"
-}
-
-if (-not (Test-Path $Config.UserFolder -PathType Container)) {
-    $ValidationErrors += "User Folder NOT FOUND: $($Config.UserFolder)"
-}
-
-if ([string]::IsNullOrEmpty($Config.RomPath)) {
-    $ValidationErrors += "ROM File NOT SET: auto-detection failed. Pass -RomFilePath explicitly."
-}
-elseif (-not (Test-Path $Config.RomPath)) {
-    $ValidationErrors += "ROM File NOT FOUND: $($Config.RomPath)"
-}
-
-if ($ValidationErrors.Count -gt 0) {
-    # In NoGUI mode (Python), write errors to stderr and exit silently
-    if ($NoGUI) {
-        foreach ($ErrorMsg in $ValidationErrors) {
-            Write-Error $ErrorMsg
-        }
-        exit 1
+    $candidates = @(
+        (Join-Path $Script:ScriptDir 'Dolphin.exe'),
+        (Join-Path (Split-Path -Parent $Script:ScriptDir) 'Dolphin.exe')
+    )
+    foreach ($c in $candidates) {
+        if (Test-Path $c -PathType Leaf) { return [System.IO.Path]::GetFullPath($c) }
     }
-    
-    # In GUI mode (manual), show full error message
-    Write-Host "==================================================================" -ForegroundColor Cyan
-    Write-Host "CONFIGURATION VALIDATION" -ForegroundColor Cyan
-    Write-Host "==================================================================" -ForegroundColor Cyan
-    Write-Host "VALIDATION ERRORS:" -ForegroundColor Red
-    foreach ($ErrorMsg in $ValidationErrors) {
-        Write-Host "  - $ErrorMsg" -ForegroundColor Red
+    return $null
+}
+
+function Resolve-UserFolder {
+    param([string]$Hint, [string]$DolphinDir)
+    if ($Hint) { return $Hint.TrimEnd('\') }
+
+    $portable  = Join-Path $DolphinDir 'User'
+    $installed = Join-Path $env:USERPROFILE 'Documents\Dolphin Emulator'
+    if (Test-Path $portable  -PathType Container) { return $portable.TrimEnd('\')  }
+    if (Test-Path $installed -PathType Container) { return $installed.TrimEnd('\') }
+    return $null
+}
+
+function Resolve-RomFile {
+    param([string]$Hint, [string]$DolphinDir)
+    if ($Hint) { return $Hint }
+
+    # Walk up to 3 ancestors of Dolphin dir, looking for Jeux/Games/ROMs subfolders.
+    $parents = @($DolphinDir)
+    $cur = $DolphinDir
+    for ($i = 0; $i -lt 3; $i++) {
+        $cur = Split-Path -Parent $cur
+        if ($cur) { $parents += $cur }
     }
-    Write-Host ""
-    Write-Host "SOLUTIONS:" -ForegroundColor Yellow
-    Write-Host "  1. Verify paths are correct" -ForegroundColor Yellow
-    Write-Host "  2. Launch Dolphin at least once to create User folder" -ForegroundColor Yellow
-    Write-Host "  3. Provide paths explicitly:" -ForegroundColor Yellow
-    Write-Host "     .\launch_dolphin_instances.ps1 -DolphinExePath 'C:\Path\To\Dolphin.exe' \" -ForegroundColor Yellow
-    Write-Host "                                     -UserFolderPath 'C:\Path\To\UserFolder' \" -ForegroundColor Yellow
-    Write-Host "                                     -RomFilePath 'C:\Path\To\ROM.rvz'" -ForegroundColor Yellow
-    Write-Host "==================================================================" -ForegroundColor Cyan
-    exit 1
-}
 
-# Only show validation success in GUI mode
-if (-not $NoGUI) {
-    Write-Host "==================================================================" -ForegroundColor Cyan
-    Write-Host "CONFIGURATION VALIDATION" -ForegroundColor Cyan
-    Write-Host "==================================================================" -ForegroundColor Cyan
-    Write-Host "Dolphin.exe: $($Config.DolphinPath)" -ForegroundColor White
-    Write-Host "User Folder: $($Config.UserFolder)" -ForegroundColor White
-    Write-Host "ROM File   : $($Config.RomPath)" -ForegroundColor White
-    Write-Host ""
-    Write-Host "All paths validated successfully!" -ForegroundColor Green
-    Write-Host "==================================================================" -ForegroundColor Cyan
-    Write-Host ""
-}
+    $roots = foreach ($p in $parents) {
+        Join-Path $p 'Jeux'; Join-Path $p 'Games'; Join-Path $p 'ROMs'
+    }
+    $roots = $roots | Select-Object -Unique
 
-Write-Host "All paths validated successfully!" -ForegroundColor Green
-
-# Save configuration for next run
-Save-LauncherConfig -DolphinPath $Config.DolphinPath `
-                    -UserFolder $Config.UserFolder `
-                    -RomPath $Config.RomPath
-
-Write-Host "==================================================================" -ForegroundColor Cyan
-Write-Host ""
-
-function Get-LauncherConfig {
-    if (Test-Path $ConfigFile) {
-        try {
-            $config = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
-            Write-Host "Loaded saved configuration from: $ConfigFile" -ForegroundColor Cyan
-            return $config
-        }
-        catch {
-            Write-Warning "Failed to load configuration: $_"
-            return $null
+    foreach ($root in $roots) {
+        if (-not (Test-Path $root -PathType Container)) { continue }
+        foreach ($ext in $Script:RomExts) {
+            $found = Get-ChildItem -Path $root -Filter $ext -Recurse -ErrorAction SilentlyContinue |
+                     Where-Object { $_.Name -match $Script:RomPatterns } |
+                     Select-Object -First 1
+            if ($found) { return $found.FullName }
         }
     }
     return $null
 }
 
-# Try to load saved configuration if parameters not provided
-if ([string]::IsNullOrEmpty($DolphinExePath) -or 
-    [string]::IsNullOrEmpty($UserFolderPath) -or 
-    [string]::IsNullOrEmpty($RomFilePath)) {
-    
-    $savedConfig = Get-LauncherConfig
-    
-    if ($null -ne $savedConfig) {
-        if ([string]::IsNullOrEmpty($DolphinExePath)) { 
-            $DolphinExePath = $savedConfig.DolphinExePath 
-            Write-Host "  Using saved DolphinExePath" -ForegroundColor Gray
-        }
-        if ([string]::IsNullOrEmpty($UserFolderPath)) { 
-            $UserFolderPath = $savedConfig.UserFolderPath 
-            Write-Host "  Using saved UserFolderPath" -ForegroundColor Gray
-        }
-        if ([string]::IsNullOrEmpty($RomFilePath)) { 
-            $RomFilePath = $savedConfig.RomFilePath 
-            Write-Host "  Using saved RomFilePath" -ForegroundColor Gray
-        }
-        Write-Host ""
-    }
-}
-
-# Charger assemblies
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-
-# Definir WinAPI avec methodes utilitaires
+# ============================================================================
+# WINAPI for window enumeration / rename
+# ============================================================================
 if (-not ([System.Management.Automation.PSTypeName]'WindowManager').Type) {
     Add-Type @"
     using System;
@@ -354,46 +151,35 @@ if (-not ([System.Management.Automation.PSTypeName]'WindowManager').Type) {
     public class WindowManager {
         [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
         public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
-
         [DllImport("user32.dll")]
         public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-
         [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
         public static extern bool SetWindowText(IntPtr hWnd, string lpString);
-
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool IsWindowVisible(IntPtr hWnd);
-
         [DllImport("user32.dll", SetLastError = true)]
         public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
-        
+        [DllImport("user32.dll")]
+        public static extern bool SetForegroundWindow(IntPtr hWnd);
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
 
         public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
-        
-        // Classe pour stocker les infos de fenetre
-        public class WindowInfo {
-            public IntPtr Handle;
-            public string Title;
-        }
-        
-        // Methode pour obtenir toutes les fenetres d'un processus
+
+        public class WindowInfo { public IntPtr Handle; public string Title; }
+
         public static List<WindowInfo> GetProcessWindows(int processId) {
             List<WindowInfo> windows = new List<WindowInfo>();
-            
             EnumWindows(delegate(IntPtr hWnd, IntPtr lParam) {
                 if (IsWindowVisible(hWnd)) {
                     uint pid;
                     GetWindowThreadProcessId(hWnd, out pid);
-                    
                     if (pid == processId) {
                         StringBuilder sb = new StringBuilder(512);
                         GetWindowText(hWnd, sb, sb.Capacity);
                         string title = sb.ToString();
-                        
                         if (!string.IsNullOrEmpty(title)) {
                             windows.Add(new WindowInfo { Handle = hWnd, Title = title });
                         }
@@ -401,1165 +187,708 @@ if (-not ([System.Management.Automation.PSTypeName]'WindowManager').Type) {
                 }
                 return true;
             }, IntPtr.Zero);
-            
             return windows;
         }
     }
 "@
 }
 
-#region Functions
-
-function Test-Prerequisites {
-    $errors = @()
-    
-    # Validate Dolphin.exe exists (file)
-    if (-not (Test-Path $Config.DolphinPath -PathType Leaf)) {
-        $errors += "Dolphin introuvable : $($Config.DolphinPath)"
-    }
-    
-    # Validate User folder exists (directory)
-    if (-not (Test-Path $Config.UserFolder -PathType Container)) {
-        $errors += "Dossier utilisateurs introuvable : $($Config.UserFolder)"
-    }
-    
-    # Validate ROM file exists (file)
-    if ([string]::IsNullOrEmpty($Config.RomPath)) {
-        $errors += "ROM non configuree : lancez avec -RomFilePath ou placez la ROM dans un dossier 'Jeux' ou 'Games'"
-    }
-    elseif (-not (Test-Path $Config.RomPath -PathType Leaf)) {
-        $errors += "ROM introuvable : $($Config.RomPath)"
-    }
-    
-    if ($errors.Count -gt 0) {
-    $errorMessage = "Configuration errors detected:`n`n" + ($errors -join "`n`n")
-    $errorMessage += "`n`nDEBUG INFO:`n"
-    $errorMessage += "DolphinPath exists: $(Test-Path $Config.DolphinPath -PathType Leaf)`n"
-    $errorMessage += "UserFolder exists: $(Test-Path $Config.UserFolder -PathType Container)`n"
-    $errorMessage += "RomPath: $(if ([string]::IsNullOrEmpty($Config.RomPath)) { '(empty)' } else { $Config.RomPath })`n"
-    
-    [System.Windows.Forms.MessageBox]::Show(
-        $errorMessage,
-        "Configuration Error",
-        [System.Windows.Forms.MessageBoxButtons]::OK,
-        [System.Windows.Forms.MessageBoxIcon]::Error
+# ============================================================================
+# INI HELPER — single function replaces 4 copy-pasted blocks
+# ============================================================================
+function Set-IniValue {
+    <#
+    .SYNOPSIS
+        Set a key=value pair inside a section of an INI file.
+        Creates the section / key if missing, overwrites if present.
+    #>
+    param(
+        [Parameter(Mandatory)] [string] $Path,
+        [Parameter(Mandatory)] [string] $Section,
+        [Parameter(Mandatory)] [string] $Key,
+        [Parameter(Mandatory)] [string] $Value
     )
-    return $false
-}   
-    return $true
+
+    $lines = @()
+    if (Test-Path $Path) {
+        $lines = Get-Content -Path $Path -Encoding UTF8
+    }
+
+    $output            = New-Object System.Collections.Generic.List[string]
+    $sectionHeader     = "[$Section]"
+    $newLine           = "$Key = $Value"
+    $insideTarget      = $false
+    $keyWritten        = $false
+    $sectionFound      = $false
+
+    foreach ($line in $lines) {
+        # Section header
+        if ($line -match '^\s*\[(.+)\]\s*$') {
+            # If leaving the target section without having written the key, append it now
+            if ($insideTarget -and -not $keyWritten) {
+                $output.Add($newLine)
+                $keyWritten = $true
+            }
+            $insideTarget = ($line.Trim() -eq $sectionHeader)
+            if ($insideTarget) { $sectionFound = $true }
+            $output.Add($line)
+            continue
+        }
+
+        # Key inside the target section: replace
+        if ($insideTarget -and ($line -match "^\s*$([regex]::Escape($Key))\s*=")) {
+            if (-not $keyWritten) {
+                $output.Add($newLine)
+                $keyWritten = $true
+            }
+            continue
+        }
+
+        $output.Add($line)
+    }
+
+    # End-of-file fallbacks
+    if ($insideTarget -and -not $keyWritten) {
+        $output.Add($newLine)
+        $keyWritten = $true
+    }
+    if (-not $sectionFound) {
+        $output.Add('')
+        $output.Add($sectionHeader)
+        $output.Add($newLine)
+    }
+
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllLines($Path, $output, $utf8NoBom)
 }
 
+function Remove-StaleIniPaths {
+    <#
+    .SYNOPSIS
+        Strip absolute-path keys from Dolphin.ini whose target no longer exists.
+        Prevents Dolphin from re-creating ghost folder trees on startup.
+    #>
+    param([Parameter(Mandatory)] [string] $Path)
+    if (-not (Test-Path $Path)) { return 0 }
+
+    $stalePatterns = @(
+        '^\s*ISOPath\d+\s*=', '^\s*ISOPaths\s*=', '^\s*BootDefaultISO\s*=',
+        '^\s*WiiSDCardPath\s*=', '^\s*LastFilename\s*=',
+        '^\s*NANDRootPath\s*=', '^\s*DumpPath\s*='
+    )
+    $kept    = New-Object System.Collections.Generic.List[string]
+    $removed = 0
+
+    foreach ($line in (Get-Content -Path $Path -Encoding UTF8)) {
+        $isStale = $false
+        foreach ($pat in $stalePatterns) {
+            if ($line -match $pat -and $line -match '=\s*"?([a-zA-Z]:[\\/].+?)"?\s*$') {
+                $val = $Matches[1].Trim('"').Trim()
+                if (-not (Test-Path -LiteralPath $val)) {
+                    $isStale = $true
+                    $removed++
+                    break
+                }
+            }
+        }
+        if (-not $isStale) { $kept.Add($line) }
+    }
+
+    if ($removed -gt 0) {
+        $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+        [System.IO.File]::WriteAllLines($Path, $kept, $utf8NoBom)
+    }
+    return $removed
+}
+
+# ============================================================================
+# PROFILE MANAGEMENT
+# ============================================================================
 function Get-UserProfiles {
-    # Check if User folders exist in Dolphin directory
-    # Expected format: User, User1, User2, User3...
-    # IMPORTANT: We search in the PARENT directory of $Config.UserFolder
-    # Because User, User1, User2 are SIBLINGS, not children of User folder
-    
-    # Get parent directory (Dolphin-x64 folder)
-    $dolphinDir = Split-Path -Parent $Config.UserFolder
-    
-    Write-Host "Searching for User profiles in: $dolphinDir" -ForegroundColor Cyan
-    
-    $profiles = Get-ChildItem -Path $dolphinDir -Directory -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match '^User(\d*)$' } |
-        ForEach-Object {
-            $index = if ($_.Name -eq 'User') { 0 } else { [int]($_.Name -replace 'User','') }
-            [PSCustomObject]@{
-                Name = $_.Name
-                Index = $index
-                Path = $_.FullName
-            }
-        } |
-        Sort-Object Index
-    
-    if ($profiles) {
-        Write-Host "Found profiles:" -ForegroundColor Green
-        foreach ($p in $profiles) {
-            Write-Host "  - $($p.Name) (Index: $($p.Index))" -ForegroundColor Gray
-        }
-    }
-    else {
-        Write-Host "WARNING: No User profiles found!" -ForegroundColor Yellow
-        Write-Host "Expected folders like: User, User1, User2..." -ForegroundColor Yellow
-    }
-    Write-Host ""
-    
-    return $profiles
-}
+    param([Parameter(Mandatory)] [string] $DolphinDir, [Parameter(Mandatory)] [string] $BaseUserFolder)
 
-function Show-LauncherDialog {
-    param([array]$Profiles)
-    
-    $form = New-Object System.Windows.Forms.Form
-    $form.Text = "Lanceur Dolphin Multi-Instance"
-    $form.Size = New-Object System.Drawing.Size(450, 270)
-    $form.StartPosition = "CenterScreen"
-    $form.FormBorderStyle = "FixedDialog"
-    $form.MaximizeBox = $false
-    
-    # Label instances
-    $lblCount = New-Object System.Windows.Forms.Label
-    $lblCount.Text = "Nombre d'instances (1-20) :"
-    $lblCount.Location = New-Object System.Drawing.Point(20, 20)
-    $lblCount.Size = New-Object System.Drawing.Size(250, 20)
-    $form.Controls.Add($lblCount)
-    
-    # NumericUpDown instances
-    $numCount = New-Object System.Windows.Forms.NumericUpDown
-    $numCount.Minimum = 1
-    $numCount.Maximum = 20 # Auto-creation enabled with reasonable limit
-    $numCount.Value = [Math]::Min(3, $Profiles.Count)
-    $numCount.Location = New-Object System.Drawing.Point(280, 18)
-    $numCount.Size = New-Object System.Drawing.Size(120, 20)
-    $form.Controls.Add($numCount)
-    
-    # Label delai
-    $lblDelay = New-Object System.Windows.Forms.Label
-    $lblDelay.Text = "Delai initial avant renommage (sec) :"
-    $lblDelay.Location = New-Object System.Drawing.Point(20, 55)
-    $lblDelay.Size = New-Object System.Drawing.Size(250, 20)
-    $form.Controls.Add($lblDelay)
-    
-    # NumericUpDown delai
-    $numDelay = New-Object System.Windows.Forms.NumericUpDown
-    $numDelay.Minimum = 0
-    $numDelay.Maximum = 30
-    $numDelay.Value = $Config.InitialDelay
-    $numDelay.Location = New-Object System.Drawing.Point(280, 53)
-    $numDelay.Size = New-Object System.Drawing.Size(120, 20)
-    $form.Controls.Add($numDelay)
-    
-    # Checkbox copie config
-    $chkCopy = New-Object System.Windows.Forms.CheckBox
-    $chkCopy.Text = "Copier la configuration du 1er profil vers les autres"
-    $chkCopy.Location = New-Object System.Drawing.Point(20, 90)
-    $chkCopy.Size = New-Object System.Drawing.Size(380, 20)
-    $form.Controls.Add($chkCopy)
-    
-    # Checkbox reduire fenetre Dolphin
-    $chkMinimizeDolphin = New-Object System.Windows.Forms.CheckBox
-    $chkMinimizeDolphin.Text = "Reduire les fenetres Dolphin (menu)"
-    $chkMinimizeDolphin.Location = New-Object System.Drawing.Point(20, 115)
-    $chkMinimizeDolphin.Size = New-Object System.Drawing.Size(280, 20)
-    $chkMinimizeDolphin.Checked = $true
-    $form.Controls.Add($chkMinimizeDolphin)
-    
-    # Checkbox reduire fenetre de jeu
-    $chkMinimizeGame = New-Object System.Windows.Forms.CheckBox
-    $chkMinimizeGame.Text = "Reduire les fenetres de jeu"
-    $chkMinimizeGame.Location = New-Object System.Drawing.Point(20, 140)
-    $chkMinimizeGame.Size = New-Object System.Drawing.Size(280, 20)
-    $chkMinimizeGame.Checked = $false
-    $form.Controls.Add($chkMinimizeGame)
-    
-    # Bouton Lancer
-    $btnOk = New-Object System.Windows.Forms.Button
-    $btnOk.Text = "Lancer"
-    $btnOk.Location = New-Object System.Drawing.Point(150, 175)
-    $btnOk.Size = New-Object System.Drawing.Size(100, 30)
-    $btnOk.DialogResult = [System.Windows.Forms.DialogResult]::OK
-    $form.Controls.Add($btnOk)
-    $form.AcceptButton = $btnOk
-    
-    # Bouton Annuler
-    $btnCancel = New-Object System.Windows.Forms.Button
-    $btnCancel.Text = "Annuler"
-    $btnCancel.Location = New-Object System.Drawing.Point(260, 175)
-    $btnCancel.Size = New-Object System.Drawing.Size(100, 30)
-    $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
-    $form.Controls.Add($btnCancel)
-    $form.CancelButton = $btnCancel
-    
-    $result = $form.ShowDialog()
-    
-    if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
-        return @{
-            Count = [int]$numCount.Value
-            InitialDelay = [int]$numDelay.Value
-            CopyConfig = $chkCopy.Checked
-            MinimizeDolphin = $chkMinimizeDolphin.Checked
-            MinimizeGame = $chkMinimizeGame.Checked
-        }
-    }
-    return $null
-}
+    $profiles = @(
+        Get-ChildItem -Path $DolphinDir -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^User(\d*)$' } |
+            ForEach-Object {
+                $idx = if ($_.Name -eq 'User') { 0 } else { [int]($_.Name -replace 'User','') }
+                [PSCustomObject]@{ Name = $_.Name; Index = $idx; Path = $_.FullName }
+            } |
+            Sort-Object Index
+    )
 
-function Copy-ConfigToProfiles {
-    param([array]$Profiles)
-    
-    $sourceConfig = Join-Path $Profiles[0].Path "Config"
-    if (-not (Test-Path $sourceConfig)) {
-        Write-Warning "Configuration source introuvable : $sourceConfig"
-        return
+    # Fallback : non-portable install where User lives outside Dolphin dir
+    if ($profiles.Count -eq 0 -and (Test-Path $BaseUserFolder -PathType Container)) {
+        $profiles = @([PSCustomObject]@{
+            Name  = (Split-Path -Leaf $BaseUserFolder)
+            Index = 0
+            Path  = $BaseUserFolder
+        })
     }
-    
-    for ($i = 1; $i -lt $Profiles.Count; $i++) {
-        $destConfig = Join-Path $Profiles[$i].Path "Config"
-        if (-not (Test-Path $destConfig)) {
-            try {
-                Copy-Item -Path $sourceConfig -Destination $destConfig -Recurse -Force -ErrorAction Stop
-                Write-Host "  Config copiee vers $($Profiles[$i].Name)" -ForegroundColor Green
-            }
-            catch {
-                Write-Warning "Echec copie config vers $($Profiles[$i].Name) : $_"
-            }
-        }
-    }
+    return ,$profiles
 }
 
 function Initialize-UserProfiles {
+    <#
+    .SYNOPSIS
+        Make sure User, User1 ... User(N-1) exist next to Dolphin.exe.
+        Returns $true on success, $false if any required profile failed.
+    #>
     param(
-        [int]$NumInstances,
-        [string]$BaseUserFolder
+        [Parameter(Mandatory)] [int]    $NumInstances,
+        [Parameter(Mandatory)] [string] $BaseUserFolder,
+        [Parameter(Mandatory)] [string] $DolphinDir
     )
-    
-    Write-Host "Checking User profiles..." -ForegroundColor Cyan
-    Write-Host "  Base User folder: $BaseUserFolder" -ForegroundColor Gray
-    
-    $DolphinDir = Split-Path -Parent $BaseUserFolder
-    
-    # Verify base User folder exists
+
     if (-not (Test-Path $BaseUserFolder -PathType Container)) {
-        Write-Error "Base User folder not found: $BaseUserFolder"
-        Write-Error "SOLUTION: Launch Dolphin at least once to create User folder"
+        Write-Err "Base User folder not found: $BaseUserFolder"
         return $false
     }
-    
-    Write-Host "  Base User folder exists" -ForegroundColor Green
-    Write-Host "  Required instances: $NumInstances" -ForegroundColor Cyan
-    Write-Host ""
-    
-    # Track created/existing profiles
-    $CreatedCount = 0
-    $ExistingCount = 0
-    $FailedCount = 0
-    
-    # Create User1, User2, ... User(N-1) if missing
+
+    $created = 0; $existing = 0; $failed = 0
+
     for ($i = 1; $i -lt $NumInstances; $i++) {
-        $TargetFolder = Join-Path $DolphinDir "User$i"
-        
-        if (Test-Path $TargetFolder -PathType Container) {
-            Write-Host "  User$i : Already exists" -ForegroundColor Gray
-            $ExistingCount++
+        $target = Join-Path $DolphinDir "User$i"
+        if (Test-Path $target -PathType Container) {
+            $existing++
+            continue
         }
-        else {
-            Write-Host "  User$i : Creating from base User folder..." -ForegroundColor Yellow
-            
-            try {
-                # Copy entire User folder structure
-                Copy-Item -Path $BaseUserFolder -Destination $TargetFolder -Recurse -Force -ErrorAction Stop
-                
-                # Remove empty GBA/Saves folders (Dolphin default, unused for Wii games)
-                $GbaFolder = Join-Path $TargetFolder "GBA"
-                if (Test-Path $GbaFolder -PathType Container) {
-                    $GbaFiles = Get-ChildItem -Path $GbaFolder -Recurse -File
-                    if ($GbaFiles.Count -eq 0) {
-                        Remove-Item -Path $GbaFolder -Recurse -Force -ErrorAction SilentlyContinue
-                    }
-                }
 
-                # Verify copy succeeded
-                if (Test-Path $TargetFolder -PathType Container) {
-                    Write-Host "  User$i : Created successfully" -ForegroundColor Green
-                    $CreatedCount++
-                    
-                    # Verify Config folder exists inside
-                    $ConfigFolder = Join-Path $TargetFolder "Config"
-                    if (Test-Path $ConfigFolder) {
-                        Write-Host "    Config folder verified" -ForegroundColor DarkGray
-                    }
-                    else {
-                        Write-Host "    WARNING: Config folder missing, creating..." -ForegroundColor Yellow
-                        New-Item -ItemType Directory -Path $ConfigFolder -Force | Out-Null
-                    }
-                }
-                else {
-                    Write-Error "  User$i : Copy appeared to succeed but folder not found"
-                    $FailedCount++
-                }
+        try {
+            Copy-Item -Path $BaseUserFolder -Destination $target -Recurse -Force -ErrorAction Stop
+
+            # Drop empty GBA folder Dolphin creates by default (not used by Wii games)
+            $gba = Join-Path $target 'GBA'
+            if ((Test-Path $gba -PathType Container) -and
+                (-not (Get-ChildItem -Path $gba -Recurse -File -ErrorAction SilentlyContinue))) {
+                Remove-Item -Path $gba -Recurse -Force -ErrorAction SilentlyContinue
             }
-            catch {
-                Write-Error "  User$i : Failed to create - $($_)"
-                Write-Error "    Source: $BaseUserFolder"
-                Write-Error "    Destination: $TargetFolder"
-                $FailedCount++
-            }
+
+            # Make sure Config exists
+            $cfg = Join-Path $target 'Config'
+            if (-not (Test-Path $cfg)) { New-Item -ItemType Directory -Path $cfg -Force | Out-Null }
+
+            Write-Ok  "  User$i : created"
+            $created++
         }
-    }
-    
-    Write-Host ""
-    Write-Host "Profile creation summary:" -ForegroundColor Cyan
-    Write-Host "  Existing profiles : $ExistingCount" -ForegroundColor Gray
-    Write-Host "  Created profiles  : $CreatedCount" -ForegroundColor Green
-    Write-Host "  Failed profiles   : $FailedCount" -ForegroundColor $(if ($FailedCount -gt 0) { "Red" } else { "Gray" })
-    Write-Host "  Total required    : $($NumInstances - 1)" -ForegroundColor Cyan
-    Write-Host ""
-    
-    # Return success if no failures
-    if ($FailedCount -gt 0) {
-        Write-Error "Some User profiles could not be created"
-        Write-Error "SOLUTION: Manually copy User folder and rename to User1, User2, etc."
-        return $false
-    }
-    
-    # Also clean base User folder GBA if empty (Dolphin re-creates it on startup if needed)
-    $BaseGba = Join-Path $BaseUserFolder "GBA"
-    if (Test-Path $BaseGba -PathType Container) {
-        $BaseGbaFiles = Get-ChildItem -Path $BaseGba -Recurse -File
-        if ($BaseGbaFiles.Count -eq 0) {
-            Remove-Item -Path $BaseGba -Recurse -Force -ErrorAction SilentlyContinue
-            Write-Host "  Cleaned empty GBA folder from base User" -ForegroundColor DarkGray
+        catch [System.IO.IOException], [System.UnauthorizedAccessException], [System.Exception] {
+            Write-Err "  User$i : failed - $($_.Exception.Message)"
+            $failed++
         }
     }
 
-    return $true
+    Write-Info "Profiles: $existing existing, $created created, $failed failed"
+    return ($failed -eq 0)
 }
 
+function Set-DolphinInstanceConfig {
+    <#
+    .SYNOPSIS
+        Apply all required INI tweaks for one Dolphin instance:
+          - GFX.ini : RenderToMain = False (so we can minimize without freezing render)
+          - Dolphin.ini : Backend=No audio, Volume=0, CPUThread=False, PauseOnFocusLost=False
+          - Strip stale absolute paths from Dolphin.ini
+    #>
+    param([Parameter(Mandatory)] [string] $UserFolderPath, [Parameter(Mandatory)] [int] $Index)
+
+    if (-not (Test-Path $UserFolderPath -PathType Container)) {
+        Write-Warn2 "  Instance $Index : User folder missing, skipping INI config"
+        return
+    }
+
+    $cfgDir = Join-Path $UserFolderPath 'Config'
+    if (-not (Test-Path $cfgDir)) { New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null }
+
+    $gfxIni     = Join-Path $cfgDir 'GFX.ini'
+    $dolphinIni = Join-Path $cfgDir 'Dolphin.ini'
+
+    try {
+        # GFX: render even when minimized
+        Set-IniValue -Path $gfxIni -Section 'Settings' -Key 'RenderToMain' -Value 'False'
+
+        # Strip ghost paths BEFORE writing new keys, otherwise we'd preserve them
+        $removed = Remove-StaleIniPaths -Path $dolphinIni
+        if ($removed -gt 0) {
+            Write-Dim "  Instance $Index : removed $removed stale path(s) from Dolphin.ini"
+        }
+
+        # Audio off
+        Set-IniValue -Path $dolphinIni -Section 'DSP'       -Key 'Backend' -Value 'No audio'
+        Set-IniValue -Path $dolphinIni -Section 'DSP'       -Key 'Volume'  -Value '0'
+        # Single-core (avoid race condition crashes when many instances run together)
+        Set-IniValue -Path $dolphinIni -Section 'Core'      -Key 'CPUThread' -Value 'False'
+        # Don't pause when window loses focus (training cycles through instances)
+        Set-IniValue -Path $dolphinIni -Section 'Interface' -Key 'PauseOnFocusLost' -Value 'False'
+
+        Write-Ok "  Instance $Index : INI configured (audio muted, render-when-minimized, no focus pause)"
+    }
+    catch [System.Exception] {
+        Write-Err "  Instance $Index : INI write failed - $($_.Exception.Message)"
+    }
+}
+
+# ============================================================================
+# LAUNCH + WINDOW RENAME
+# ============================================================================
 function Start-DolphinInstance {
     param(
-        [string]$UserProfile,
-        [int]$Index
+        [Parameter(Mandatory)] [int]    $Index,
+        [Parameter(Mandatory)] [string] $DolphinExe,
+        [Parameter(Mandatory)] [string] $DolphinDir,
+        [string] $RomPath
     )
-    
+
+    $userName = if ($Index -eq 0) { 'User' } else { "User$Index" }
+    $userPath = [System.IO.Path]::GetFullPath((Join-Path $DolphinDir $userName))
+
+    if (-not (Test-Path $userPath -PathType Container)) {
+        Write-Warn2 "  User folder missing: $userPath (Dolphin will create a fresh one)"
+    }
+
+    $argLine = if ([string]::IsNullOrEmpty($RomPath)) {
+        "--user `"$userPath`""
+    } else {
+        "--user `"$userPath`" `"$RomPath`""
+    }
+
     try {
-        # Build absolute path to User folder
-        $UserFolderName = if ($Index -eq 0) { "User" } else { "User$Index" }
-        $DolphinDir = Split-Path -Parent $Config.DolphinPath
-        $UserFolderAbsolutePath = Join-Path $DolphinDir $UserFolderName
-
-        # CRITICAL: Convert to absolute path and verify
-        $UserFolderAbsolutePath = [System.IO.Path]::GetFullPath($UserFolderAbsolutePath)
-
-        Write-Host "  DEBUG: Using User folder: $UserFolderAbsolutePath" -ForegroundColor Cyan
-
-        # Verify folder exists BEFORE launching
-        if (-not (Test-Path $UserFolderAbsolutePath -PathType Container)) {
-            Write-Warning "  User folder not found: $UserFolderAbsolutePath"
-            Write-Warning "  Dolphin will create a NEW user folder instead of loading existing config"
-            Write-Warning "  SOLUTION: Create User profiles manually or copy from User folder"
-        }
-
-        # IMPORTANT: Set WorkingDirectory to Dolphin folder to avoid relative path issues
-        # NOTE: Start-Process -ArgumentList with an array silently joins elements
-        #       with spaces, breaking paths that contain spaces.
-        #       Use a single quoted string with explicit quoting instead.
-        if ([string]::IsNullOrEmpty($Config.RomPath)) {
-            $quotedArgs = "--user `"$UserFolderAbsolutePath`""
-        }
-        else {
-            $quotedArgs = "--user `"$UserFolderAbsolutePath`" `"$($Config.RomPath)`""
-        }
-        Write-Host "  DEBUG: Dolphin launch args: $quotedArgs" -ForegroundColor DarkGray
-
-        $process = Start-Process -FilePath $Config.DolphinPath `
-                 -ArgumentList $quotedArgs `
-                 -WorkingDirectory $DolphinDir `
-                 -PassThru `
-                 -ErrorAction Stop
-        
-        # Title format: MHTri-0, MHTri-1, MHTri-2...
-        # Matches Index (0-based) for consistency with Python
-        return @{
-            Process = $process
-            Index = $Index
-            UserProfile = $UserProfile
-            Title = "MHTri-$Index"
+        $proc = Start-Process -FilePath $DolphinExe `
+                              -ArgumentList $argLine `
+                              -WorkingDirectory $DolphinDir `
+                              -PassThru -ErrorAction Stop
+        return [PSCustomObject]@{
+            Process     = $proc
+            Index       = $Index
+            UserProfile = $userName
+            Title       = "MHTri-$Index"
         }
     }
-    catch {
-        Write-Warning "Erreur lancement instance $Index ($UserProfile) : $_"
+    catch [System.Exception] {
+        Write-Warn2 "  Launch failed for User$Index : $($_.Exception.Message)"
         return $null
     }
 }
 
-function Find-AndRenameWindow {
+function Rename-DolphinWindow {
     param(
-        [int]$ProcessId,
-        [string]$SearchTerm,
-        [string]$NewTitle,
-        [int]$TimeoutSeconds,
-        [bool]$MinimizeDolphin,
-        [bool]$MinimizeGame
+        [Parameter(Mandatory)] [int]    $ProcessId,
+        [Parameter(Mandatory)] [string] $NewTitle,
+        [int]  $TimeoutSec     = 15,
+        [bool] $MinimizeMenu   = $false,
+        [bool] $MinimizeGame   = $false
     )
-    
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    $renamed = $false
-    
-    Write-Host "    Recherche fenetre pour PID $ProcessId..." -ForegroundColor Gray
-    
-    while ((Get-Date) -lt $deadline -and -not $renamed) {
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
         try {
-            # Utiliser la methode C# pour recuperer les fenetres
             $windows = [WindowManager]::GetProcessWindows($ProcessId)
-            
-            if ($windows.Count -gt 0) {
-                Write-Host "    Trouve $($windows.Count) fenetre(s)" -ForegroundColor Cyan
-                
-                # Reduire les fenetres "Dolphin 2509" (menu) si demande
-                if ($MinimizeDolphin) {
-                    foreach ($win in $windows) {
-                        if ($win.Title -eq "Dolphin 2509") {
-                            [WindowManager]::ShowWindow($win.Handle, 6) | Out-Null
-                            Write-Host "    Fenetre Dolphin reduite" -ForegroundColor DarkGray
-                        }
-                    }
-                }
-                
-                # Chercher et renommer la fenetre de jeu
-                foreach ($win in $windows) {
-                    # Chercher "Monster Hunter Tri" ou "RMHP" dans le titre
-                    if ($win.Title -like "*Monster Hunter Tri*" -or $win.Title -like "*RMHP*") {
-                        Write-Host "    Fenetre correspondante : '$($win.Title)'" -ForegroundColor Yellow
-                        
-                        # Tenter le renommage
-                        $result = [WindowManager]::SetWindowText($win.Handle, $NewTitle)
-                        
-                        if ($result) {
-                            Write-Host "    SUCCES : Renomme en '$NewTitle'" -ForegroundColor Green
-                            
-                            # Reduire la fenetre de jeu si demande
-                            if ($MinimizeGame) {
-                                [WindowManager]::ShowWindow($win.Handle, 6) | Out-Null
-                                Write-Host "    Fenetre de jeu reduite" -ForegroundColor DarkGray
-                            }
-                            
-                            $renamed = $true
-                            break
-                        }
-                        else {
-                            Write-Warning "    SetWindowText a echoue"
-                        }
+
+            if ($MinimizeMenu) {
+                foreach ($w in $windows) {
+                    if ($w.Title -eq $Script:DolphinMenuTitle) {
+                        [WindowManager]::ShowWindow($w.Handle, 6) | Out-Null   # SW_MINIMIZE
                     }
                 }
             }
+
+            foreach ($w in $windows) {
+                $isGameWindow = $false
+                foreach ($pat in $Script:WindowMatchPatterns) {
+                    if ($w.Title -like $pat) { $isGameWindow = $true; break }
+                }
+                if (-not $isGameWindow) { continue }
+
+                if ([WindowManager]::SetWindowText($w.Handle, $NewTitle)) {
+                    if ($MinimizeGame) {
+                        [WindowManager]::ShowWindow($w.Handle, 6) | Out-Null
+                    }
+                    return $true
+                }
+            }
         }
-        catch {
-            Write-Warning "    Erreur : $_"
+        catch [System.Exception] {
+            # Window enum can race with Dolphin startup; just retry until deadline
         }
-        
-        if (-not $renamed) {
-            Start-Sleep -Milliseconds 250
+        Start-Sleep -Milliseconds 250
+    }
+    return $false
+}
+
+# ============================================================================
+# PID FILE I/O (NoGUI mode only)
+# ============================================================================
+function Write-PidFile {
+    param(
+        [Parameter(Mandatory)] [int] $Index,
+        [Parameter(Mandatory)] [int] $ProcessId
+    )
+    $dir = if ([string]::IsNullOrEmpty($PidDirectory)) { $Script:ScriptDir } else { $PidDirectory }
+    if (-not (Test-Path $dir -PathType Container)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+    $file = Join-Path $dir "dolphin_pid_$Index.tmp"
+    try {
+        $ProcessId | Out-File -FilePath $file -Encoding ASCII -Force
+        Write-Dim "  PID file: $file"
+    }
+    catch [System.Exception] {
+        Write-Err "  PID file write failed: $($_.Exception.Message)"
+    }
+}
+
+# ============================================================================
+# CLEANUP HELPERS
+# ============================================================================
+function Remove-EmptyGbaFolders {
+    param([Parameter(Mandatory)] [string] $DolphinDir, [Parameter(Mandatory)] [int] $Count)
+    for ($i = 0; $i -lt $Count; $i++) {
+        $name = if ($i -eq 0) { 'User' } else { "User$i" }
+        $gba  = Join-Path (Join-Path $DolphinDir $name) 'GBA'
+        if (-not (Test-Path $gba -PathType Container)) { continue }
+        if (Get-ChildItem -Path $gba -Recurse -File -ErrorAction SilentlyContinue) { continue }
+
+        Remove-Item -Path $gba -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path $gba) {
+            Start-Sleep -Seconds 3
+            Remove-Item -Path $gba -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
-    
-    return $renamed
+}
+
+function Remove-PhantomDesktopFolders {
+    $desktop = Join-Path $env:USERPROFILE 'Desktop'
+    if (-not (Test-Path $desktop -PathType Container)) { return }
+
+    Get-ChildItem -Path $desktop -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^(?i)Monster\s*Hunter' } |
+        ForEach-Object {
+            $files = Get-ChildItem -Path $_.FullName -Recurse -File -ErrorAction SilentlyContinue
+            if (-not $files) {
+                Remove-Item -Path $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                if (-not (Test-Path $_.FullName)) {
+                    Write-Dim "Cleaned phantom Desktop folder: $($_.Name)"
+                }
+            }
+        }
+}
+
+# ============================================================================
+# GUI : LAUNCHER DIALOG + CONTROL PANEL
+# ============================================================================
+function Show-LauncherDialog {
+    param([Parameter(Mandatory)] [array] $Profiles)
+
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = "Dolphin Multi-Instance Launcher"
+    $form.Size = New-Object System.Drawing.Size(450, 240)
+    $form.StartPosition = "CenterScreen"
+    $form.FormBorderStyle = "FixedDialog"
+    $form.MaximizeBox = $false
+
+    function New-Label($text, $x, $y, $w = 250) {
+        $l = New-Object System.Windows.Forms.Label
+        $l.Text = $text
+        $l.Location = New-Object System.Drawing.Point($x, $y)
+        $l.Size = New-Object System.Drawing.Size($w, 20)
+        $form.Controls.Add($l)
+    }
+
+    New-Label "Number of instances (1-20):" 20 20
+    $numCount = New-Object System.Windows.Forms.NumericUpDown
+    $numCount.Minimum = 1; $numCount.Maximum = 20
+    $numCount.Value = [Math]::Max(1, [Math]::Min(3, $Profiles.Count))
+    $numCount.Location = New-Object System.Drawing.Point(280, 18)
+    $numCount.Size = New-Object System.Drawing.Size(120, 20)
+    $form.Controls.Add($numCount)
+
+    New-Label "Initial delay before rename (sec):" 20 55
+    $numDelay = New-Object System.Windows.Forms.NumericUpDown
+    $numDelay.Minimum = 0; $numDelay.Maximum = 30
+    $numDelay.Value = $Script:InitialDelaySec
+    $numDelay.Location = New-Object System.Drawing.Point(280, 53)
+    $numDelay.Size = New-Object System.Drawing.Size(120, 20)
+    $form.Controls.Add($numDelay)
+
+    $chkMinDolphin = New-Object System.Windows.Forms.CheckBox
+    $chkMinDolphin.Text = "Minimize Dolphin menu windows"
+    $chkMinDolphin.Location = New-Object System.Drawing.Point(20, 90)
+    $chkMinDolphin.Size = New-Object System.Drawing.Size(380, 20)
+    $chkMinDolphin.Checked = $true
+    $form.Controls.Add($chkMinDolphin)
+
+    $chkMinGame = New-Object System.Windows.Forms.CheckBox
+    $chkMinGame.Text = "Minimize game windows"
+    $chkMinGame.Location = New-Object System.Drawing.Point(20, 115)
+    $chkMinGame.Size = New-Object System.Drawing.Size(380, 20)
+    $form.Controls.Add($chkMinGame)
+
+    $btnOk = New-Object System.Windows.Forms.Button
+    $btnOk.Text = "Launch"
+    $btnOk.Location = New-Object System.Drawing.Point(150, 150)
+    $btnOk.Size = New-Object System.Drawing.Size(100, 30)
+    $btnOk.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $form.Controls.Add($btnOk); $form.AcceptButton = $btnOk
+
+    $btnCancel = New-Object System.Windows.Forms.Button
+    $btnCancel.Text = "Cancel"
+    $btnCancel.Location = New-Object System.Drawing.Point(260, 150)
+    $btnCancel.Size = New-Object System.Drawing.Size(100, 30)
+    $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $form.Controls.Add($btnCancel); $form.CancelButton = $btnCancel
+
+    if ($form.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return $null }
+
+    return @{
+        Count           = [int]$numCount.Value
+        InitialDelay    = [int]$numDelay.Value
+        MinimizeDolphin = $chkMinDolphin.Checked
+        MinimizeGame    = $chkMinGame.Checked
+    }
 }
 
 function Show-ControlPanel {
-    param([array]$Instances)
-    
-    # Close instances window shape
+    param([Parameter(Mandatory)] [array] $Instances)
+
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+
     $form = New-Object System.Windows.Forms.Form
-    $form.Text = "Gestionnaire d'instances Dolphin"
+    $form.Text = "Dolphin Instance Manager"
     $form.Size = New-Object System.Drawing.Size(550, 350)
     $form.StartPosition = "CenterScreen"
-    $form.TopMost = $true  # Force window to front
-    
-    # Label
-    $lblInfo = New-Object System.Windows.Forms.Label
-    $lblInfo.Text = "Instances actives (selectionner pour fermer) :"
-    $lblInfo.Location = New-Object System.Drawing.Point(20, 15)
-    $lblInfo.Size = New-Object System.Drawing.Size(500, 20)
-    $form.Controls.Add($lblInfo)
-    
-    # ListBox
+    $form.TopMost = $true
+
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.Text = "Active instances (select to close):"
+    $lbl.Location = New-Object System.Drawing.Point(20, 15)
+    $lbl.Size = New-Object System.Drawing.Size(500, 20)
+    $form.Controls.Add($lbl)
+
     $listBox = New-Object System.Windows.Forms.ListBox
     $listBox.Location = New-Object System.Drawing.Point(20, 40)
     $listBox.Size = New-Object System.Drawing.Size(500, 200)
     $listBox.SelectionMode = "MultiExtended"
     $form.Controls.Add($listBox)
-    
-    # Remplir la liste
-    foreach ($inst in $Instances) {
-        $status = if ($inst.Process.HasExited) { "[FERMEE]" } else { "[ACTIVE]" }
-        $text = "$status $($inst.Title) - PID:$($inst.Process.Id) - $($inst.UserProfile)"
-        $listBox.Items.Add($text) | Out-Null
+
+    $refresh = {
+        $listBox.Items.Clear()
+        foreach ($inst in $Instances) {
+            $status = if ($inst.Process.HasExited) { "[CLOSED]" } else { "[ACTIVE]" }
+            $listBox.Items.Add("$status $($inst.Title) - PID:$($inst.Process.Id) - $($inst.UserProfile)") | Out-Null
+        }
     }
-    
-    # Bouton Fermer selection
+    & $refresh
+
+    $closeProc = {
+        param($inst)
+        try {
+            if (-not $inst.Process.HasExited) {
+                $inst.Process.CloseMainWindow() | Out-Null
+                Start-Sleep -Milliseconds 300
+                if (-not $inst.Process.HasExited) { $inst.Process.Kill() }
+            }
+        }
+        catch [System.Exception] {
+            Write-Warn2 "Close failed PID $($inst.Process.Id): $($_.Exception.Message)"
+        }
+    }
+
     $btnClose = New-Object System.Windows.Forms.Button
-    $btnClose.Text = "Fermer selection"
+    $btnClose.Text = "Close selected"
     $btnClose.Location = New-Object System.Drawing.Point(20, 260)
     $btnClose.Size = New-Object System.Drawing.Size(150, 35)
     $btnClose.Add_Click({
-        $selected = $listBox.SelectedIndices
-        if ($selected.Count -eq 0) { return }
-        
-        foreach ($index in $selected) {
-            $inst = $Instances[$index]
-            try {
-                if (-not $inst.Process.HasExited) {
-                    $inst.Process.CloseMainWindow() | Out-Null
-                    Start-Sleep -Milliseconds 300
-                    if (-not $inst.Process.HasExited) {
-                        $inst.Process.Kill()
-                    }
-                }
-            }
-            catch {
-                Write-Warning "Erreur fermeture PID $($inst.Process.Id) : $_"
-            }
-        }
-        
-        # Rafraichir la liste
-        $listBox.Items.Clear()
-        foreach ($inst in $Instances) {
-            $status = if ($inst.Process.HasExited) { "[FERMEE]" } else { "[ACTIVE]" }
-            $text = "$status $($inst.Title) - PID:$($inst.Process.Id) - $($inst.UserProfile)"
-            $listBox.Items.Add($text) | Out-Null
-        }
+        foreach ($i in $listBox.SelectedIndices) { & $closeProc $Instances[$i] }
+        & $refresh
     })
     $form.Controls.Add($btnClose)
-    
-    # Bouton Tout fermer
+
     $btnCloseAll = New-Object System.Windows.Forms.Button
-    $btnCloseAll.Text = "Tout fermer"
+    $btnCloseAll.Text = "Close all"
     $btnCloseAll.Location = New-Object System.Drawing.Point(190, 260)
     $btnCloseAll.Size = New-Object System.Drawing.Size(150, 35)
     $btnCloseAll.Add_Click({
-        foreach ($inst in $Instances) {
-            try {
-                if (-not $inst.Process.HasExited) {
-                    $inst.Process.CloseMainWindow() | Out-Null
-                    Start-Sleep -Milliseconds 300
-                    if (-not $inst.Process.HasExited) {
-                        $inst.Process.Kill()
-                    }
-                }
-            }
-            catch {}
-        }
+        foreach ($inst in $Instances) { & $closeProc $inst }
         $form.Close()
     })
     $form.Controls.Add($btnCloseAll)
-    
-    # Bouton Quitter
+
     $btnQuit = New-Object System.Windows.Forms.Button
-    $btnQuit.Text = "Quitter (laisser ouvert)"
+    $btnQuit.Text = "Quit (leave open)"
     $btnQuit.Location = New-Object System.Drawing.Point(360, 260)
     $btnQuit.Size = New-Object System.Drawing.Size(160, 35)
     $btnQuit.Add_Click({ $form.Close() })
     $form.Controls.Add($btnQuit)
-    
-    # Bring window to foreground
-    Add-Type @"
-        using System;
-        using System.Runtime.InteropServices;
-        public class WindowHelper {
-            [DllImport("user32.dll")]
-            [return: MarshalAs(UnmanagedType.Bool)]
-            public static extern bool SetForegroundWindow(IntPtr hWnd);
-            
-            [DllImport("user32.dll")]
-            public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-        }
-"@
-    
+
     $form.Add_Shown({
-        $handle = $form.Handle
-        [WindowHelper]::ShowWindow($handle, 5)  # SW_SHOW
-        [WindowHelper]::SetForegroundWindow($handle)
+        [WindowManager]::SetForegroundWindow($form.Handle) | Out-Null
         $form.Activate()
     })
-    
     $form.ShowDialog() | Out-Null
 }
 
-#endregion
+# ============================================================================
+# MAIN
+# ============================================================================
+Write-Info "=== Dolphin Multi-Instance Launcher ==="
 
-#region Main
+# ---- Step 1 : load saved config to fill missing parameters -----------------
+$saved = Get-SavedConfig
+if ($saved) {
+    if (-not $DolphinExePath -and $saved.PSObject.Properties['DolphinExePath']) { $DolphinExePath = $saved.DolphinExePath }
+    if (-not $UserFolderPath -and $saved.PSObject.Properties['UserFolderPath']) { $UserFolderPath = $saved.UserFolderPath }
+    if (-not $RomFilePath    -and $saved.PSObject.Properties['RomFilePath'])    { $RomFilePath    = $saved.RomFilePath }
+}
 
-Write-Host "=== Lanceur Multi-Instance Dolphin ===" -ForegroundColor Cyan
-Write-Host ""
+# ---- Step 2 : resolve all paths --------------------------------------------
+$DolphinExePath = Resolve-DolphinExe -Hint $DolphinExePath
+if (-not $DolphinExePath) {
+    Write-Err "Dolphin.exe not found. Pass -DolphinExePath or place this script next to Dolphin.exe."
+    exit 1
+}
+$DolphinDir = Split-Path -Parent $DolphinExePath
 
-# Verifications
-if (-not (Test-Prerequisites)) {
+$UserFolderPath = Resolve-UserFolder -Hint $UserFolderPath -DolphinDir $DolphinDir
+if (-not $UserFolderPath) {
+    Write-Err "Dolphin User folder not found. Launch Dolphin once or pass -UserFolderPath."
     exit 1
 }
 
-# Recuperer les profils
-$profiles = Get-UserProfiles
+$RomFilePath = Resolve-RomFile -Hint $RomFilePath -DolphinDir $DolphinDir
+if (-not $RomFilePath) {
+    Write-Warn2 "ROM auto-detection failed — Dolphin will start without a ROM."
+}
+
+# ---- Step 3 : validate -----------------------------------------------------
+$errors = @()
+if (-not (Test-Path $DolphinExePath -PathType Leaf))      { $errors += "Dolphin.exe not found: $DolphinExePath" }
+if (-not (Test-Path $UserFolderPath -PathType Container)) { $errors += "User folder not found: $UserFolderPath" }
+if ($RomFilePath -and -not (Test-Path $RomFilePath -PathType Leaf)) { $errors += "ROM not found: $RomFilePath" }
+
+if ($errors.Count -gt 0) {
+    foreach ($e in $errors) { Write-Err "  - $e" }
+    exit 1
+}
+
+Write-Ok "Dolphin.exe : $DolphinExePath"
+Write-Ok "User folder : $UserFolderPath"
+Write-Ok "ROM file    : $(if ($RomFilePath) { $RomFilePath } else { '(none)' })"
+
+Save-LauncherConfig -DolphinPath $DolphinExePath -UserFolder $UserFolderPath -RomPath $RomFilePath
+
+# ---- Step 4 : enumerate profiles -------------------------------------------
+$profiles = Get-UserProfiles -DolphinDir $DolphinDir -BaseUserFolder $UserFolderPath
 if ($profiles.Count -eq 0) {
-    [System.Windows.Forms.MessageBox]::Show(
-        "Aucun profil utilisateur trouve dans :`n$($Config.UserFolder)",
-        "Erreur",
-        [System.Windows.Forms.MessageBoxButtons]::OK,
-        [System.Windows.Forms.MessageBoxIcon]::Error
-    )
+    Write-Err "No User profiles found in $DolphinDir"
     exit 1
 }
+Write-Ok "Found $($profiles.Count) profile(s)"
 
-Write-Host "Profils detectes : $($profiles.Count)" -ForegroundColor Green
-
-# AUTOMATIC MODE (called from Python)
-if ($NumInstances -gt 0 -and $NoGUI) {
-    Write-Host "Automatic mode: $NumInstances instances" -ForegroundColor Cyan
-    
+# ---- Step 5 : decide options (NoGUI vs interactive) ------------------------
+if ($NoGUI -and $NumInstances -gt 0) {
     $options = @{
-        Count = [Math]::Min($NumInstances, $profiles.Count)
-        InitialDelay = 2
-        CopyConfig = $false
-        MinimizeDolphin = $MinimizeDolphin
-        MinimizeGame = $MinimizeGame
-    }
-    
-    # Check and create missing User folders
-    Write-Host ""
-    Write-Host "Checking User profiles for $NumInstances instances..." -ForegroundColor Cyan
-    
-    $RequiredProfiles = $NumInstances
-    $AvailableProfiles = $profiles.Count
-    
-    if ($AvailableProfiles -lt $RequiredProfiles) {
-        Write-Host ""
-        Write-Host "======================================================================" -ForegroundColor Yellow
-        Write-Host "INSUFFICIENT USER PROFILES - AUTO-CREATING" -ForegroundColor Yellow
-        Write-Host "======================================================================" -ForegroundColor Yellow
-        Write-Host "  Requested instances : $RequiredProfiles" -ForegroundColor White
-        Write-Host "  Available profiles  : $AvailableProfiles" -ForegroundColor White
-        Write-Host "  Missing profiles    : $($RequiredProfiles - $AvailableProfiles)" -ForegroundColor Yellow
-        Write-Host ""
-        Write-Host "Creating missing User folders from base User folder..." -ForegroundColor Cyan
-        Write-Host "======================================================================" -ForegroundColor Yellow
-        Write-Host ""
-        
-        # Use the first profile as base (usually "User")
-        $BaseUserFolder = $profiles[0].Path
-        
-        # Call Initialize-UserProfiles function
-        $ProfilesCreated = Initialize-UserProfiles -NumInstances $RequiredProfiles -BaseUserFolder $BaseUserFolder
-        
-        if (-not $ProfilesCreated) {
-            Write-Host ""
-            Write-Host "CRITICAL ERROR: Failed to create User profiles" -ForegroundColor Red
-            Write-Host ""
-            Write-Host "MANUAL SOLUTION:" -ForegroundColor Yellow
-            Write-Host "  1. Navigate to Dolphin directory:" -ForegroundColor Yellow
-            Write-Host "     $(Split-Path -Parent $Config.DolphinPath)" -ForegroundColor Gray
-            Write-Host "  2. Copy the 'User' folder" -ForegroundColor Yellow
-            Write-Host "  3. Rename copies to: User1, User2, User3..." -ForegroundColor Yellow
-            Write-Host "  4. Run training script again" -ForegroundColor Yellow
-            Write-Host ""
-            
-            # Write error to stderr so Python can detect it
-            Write-Error "Failed to auto-create User profiles in NoGUI mode"
-            exit 1
-        }
-        
-        # Re-scan profiles after creation
-        Write-Host "Re-scanning User profiles after creation..." -ForegroundColor Cyan
-        $profiles = Get-UserProfiles
-        Write-Host "Total profiles now available: $($profiles.Count)" -ForegroundColor Green
-        Write-Host ""
-        
-        # Update $options with the new number of profiles
-        $options.Count = [Math]::Min($NumInstances, $profiles.Count)
-        
-        # Final check
-        if ($profiles.Count -lt $RequiredProfiles) {
-            Write-Host "ERROR: Still insufficient profiles after auto-creation" -ForegroundColor Red
-            Write-Host "  Required : $RequiredProfiles" -ForegroundColor Yellow
-            Write-Host "  Available: $($profiles.Count)" -ForegroundColor Yellow
-            Write-Error "Profile auto-creation incomplete"
-            exit 1
-        }
-        
-        Write-Host "User profiles ready: $($profiles.Count) profiles available" -ForegroundColor Green
-        Write-Host ""
-    }
-    else {
-        Write-Host "User profiles check: OK ($AvailableProfiles profiles available)" -ForegroundColor Green
-        Write-Host ""
+        Count           = $NumInstances
+        InitialDelay    = $Script:InitialDelaySec
+        MinimizeDolphin = [bool]$MinimizeDolphin
+        MinimizeGame    = [bool]$MinimizeGame
     }
 }
-# INTERACTIVE MODE (manual)
 else {
-    # Show dialog
     $options = Show-LauncherDialog -Profiles $profiles
-    if ($null -eq $options) {
-        Write-Host "Operation canceled" -ForegroundColor Yellow
-        exit 0
+    if ($null -eq $options) { Write-Warn2 "Operation canceled"; exit 0 }
+}
+
+# ---- Step 6 : create missing profiles (single unified path) ----------------
+if ($options.Count -gt $profiles.Count) {
+    Write-Info "Need $($options.Count) profiles, have $($profiles.Count) — creating missing ones"
+    $ok = Initialize-UserProfiles -NumInstances $options.Count `
+                                  -BaseUserFolder $UserFolderPath `
+                                  -DolphinDir $DolphinDir
+    if (-not $ok) {
+        Write-Err "Failed to create required profiles"
+        exit 1
+    }
+    $profiles = Get-UserProfiles -DolphinDir $DolphinDir -BaseUserFolder $UserFolderPath
+    if ($profiles.Count -lt $options.Count) {
+        Write-Err "Still missing profiles after auto-create ($($profiles.Count)/$($options.Count))"
+        exit 1
     }
 }
 
-
-# ==============================================================================
-# AUTO-CREATE MISSING USER PROFILES (GUI MODE ONLY)
-# ==============================================================================
-# Note: NoGUI mode handles profile creation earlier in the script
-
-# Only execute this section if in GUI mode (NoGUI flag not set)
-if (-not $NoGUI) {
-    $RequiredProfiles = $options.Count
-    $AvailableProfiles = $profiles.Count
-
-    if ($AvailableProfiles -lt $RequiredProfiles) {
-        Write-Host ""
-        Write-Host "======================================================================" -ForegroundColor Yellow
-        Write-Host "INSUFFICIENT USER PROFILES (GUI MODE)" -ForegroundColor Yellow
-        Write-Host "======================================================================" -ForegroundColor Yellow
-        Write-Host "  Requested instances : $RequiredProfiles" -ForegroundColor White
-        Write-Host "  Available profiles  : $AvailableProfiles" -ForegroundColor White
-        Write-Host ""
-        Write-Host "Auto-creating missing User profiles..." -ForegroundColor Cyan
-        Write-Host "======================================================================" -ForegroundColor Yellow
-        Write-Host ""
-        
-        # Use the first profile as base (should be "User")
-        $BaseUserFolder = $profiles[0].Path
-        
-        $ProfilesCreated = Initialize-UserProfiles -NumInstances $RequiredProfiles -BaseUserFolder $BaseUserFolder
-        
-        if (-not $ProfilesCreated) {
-            Write-Host ""
-            Write-Host "CRITICAL ERROR: Failed to create User profiles" -ForegroundColor Red
-            Write-Host ""
-            Write-Host "MANUAL SOLUTION:" -ForegroundColor Yellow
-            Write-Host "  1. Navigate to Dolphin directory:" -ForegroundColor Yellow
-            Write-Host "     $(Split-Path -Parent $Config.DolphinPath)" -ForegroundColor Gray
-            Write-Host "  2. Copy the 'User' folder" -ForegroundColor Yellow
-            Write-Host "  3. Rename copies to: User1, User2, User3..." -ForegroundColor Yellow
-            Write-Host "  4. Run this script again" -ForegroundColor Yellow
-            Write-Host ""
-            exit 1
-        }
-        
-        # Re-scan profiles after creation
-        Write-Host "Re-scanning User profiles..." -ForegroundColor Cyan
-        $profiles = Get-UserProfiles
-        Write-Host "Profiles after auto-creation: $($profiles.Count)" -ForegroundColor Green
-        Write-Host ""
-        
-        # Final verification
-        if ($profiles.Count -lt $RequiredProfiles) {
-            Write-Host "ERROR: Still missing profiles after auto-creation" -ForegroundColor Red
-            Write-Host "  Required : $RequiredProfiles" -ForegroundColor Yellow
-            Write-Host "  Available: $($profiles.Count)" -ForegroundColor Yellow
-            exit 1
-        }
-    }
-    else {
-        Write-Host ""
-        Write-Host "User profiles check: OK ($AvailableProfiles profiles available)" -ForegroundColor Green
-    }
+# ---- Step 7 : write INI files for every instance ---------------------------
+Write-Info "Configuring Dolphin INI files..."
+for ($i = 0; $i -lt $options.Count; $i++) {
+    $name = if ($i -eq 0) { 'User' } else { "User$i" }
+    Set-DolphinInstanceConfig -UserFolderPath (Join-Path $DolphinDir $name) -Index $i
 }
 
-# Copier config si demande
-if ($options.CopyConfig) {
-    Write-Host "`nCopie de la configuration..." -ForegroundColor Cyan
-    Copy-ConfigToProfiles -Profiles $profiles
-}
-
-# ==============================================================================
-# CONFIGURE DOLPHIN INI FOR ALL INSTANCES (GFX + Audio)
-# ==============================================================================
-Write-Host "`nConfiguring Dolphin instances (GFX + audio)..." -ForegroundColor Cyan
-
-$DolphinDir = Split-Path -Parent $Config.DolphinPath
+# ---- Step 8 : launch instances ---------------------------------------------
+Write-Info "Launching $($options.Count) instance(s)..."
+$instances = New-Object System.Collections.Generic.List[object]
 
 for ($i = 0; $i -lt $options.Count; $i++) {
-    # Determine User folder path
-    $UserFolderName = if ($i -eq 0) { "User" } else { "User$i" }
-    $UserFolderPath = Join-Path $DolphinDir $UserFolderName
-    
-    # Skip if folder doesn't exist
-    if (-not (Test-Path $UserFolderPath -PathType Container)) {
-        Write-Host "  Instance $i : User folder not found, skipping" -ForegroundColor Yellow
-        continue
-    }
-    
-    # Path to Dolphin.ini
-    $ConfigFolder = Join-Path $UserFolderPath "Config"
-    $DolphinIniPath = Join-Path $ConfigFolder "Dolphin.ini"
-    
-    # Ensure Config folder exists
-    if (-not (Test-Path $ConfigFolder -PathType Container)) {
-        New-Item -ItemType Directory -Path $ConfigFolder -Force | Out-Null
-        Write-Host "  Instance $i : Created Config folder" -ForegroundColor Gray
-    }
-    
-    # Read existing INI content or create empty array
-    $ModifiedContent = @()
-    if (Test-Path $DolphinIniPath) {
-        $ModifiedContent = Get-Content $DolphinIniPath -Encoding UTF8
-    }
+    Write-Host "  [$($i+1)/$($options.Count)] $($profiles[$i].Name)... " -NoNewline
 
-    # Also configure Graphics settings to render even when minimized
-    $GraphicsIniPath = Join-Path $ConfigFolder "GFX.ini"
-    $GraphicsContent = @()
-    if (Test-Path $GraphicsIniPath) {
-        $GraphicsContent = Get-Content $GraphicsIniPath -Encoding UTF8
-    }
-
-    $HasGeneralSection = $false
-    $ModifiedGraphics = @()
-    $InsideGeneralSection = $false
-    $RenderToMainFound = $false
-
-    foreach ($line in $GraphicsContent) {
-        if ($line -match '^\[General\]') {
-            $HasGeneralSection = $true
-            $InsideGeneralSection = $true
-            $ModifiedGraphics += $line
-            continue
-        }
-        
-        if ($line -match '^\[.*\]' -and $InsideGeneralSection) {
-            if (-not $RenderToMainFound) {
-                $ModifiedGraphics += "RenderToMain = False"
-            }
-            $InsideGeneralSection = $false
-        }
-        
-        if ($line -match '^RenderToMain\s*=') {
-            $RenderToMainFound = $true
-            $ModifiedGraphics += "RenderToMain = False"
-            continue
-        }
-        
-        $ModifiedGraphics += $line
-    }
-
-    if ($HasGeneralSection -and $InsideGeneralSection -and -not $RenderToMainFound) {
-        $ModifiedGraphics += "RenderToMain = False"
-    }
-
-    if (-not $HasGeneralSection) {
-        $ModifiedGraphics += ""
-        $ModifiedGraphics += "[General]"
-        $ModifiedGraphics += "RenderToMain = False"
-    }
-
-    # Add [Core] section to prevent pausing on focus loss
-    $HasCoreSection = $false
-    $ModifiedGraphics2 = @()
-    $InsideCoreSection = $false
-    $PauseOnFocusLostFound = $false
-
-    foreach ($line in $ModifiedGraphics) {
-        if ($line -match '^\[Core\]') {
-            $HasCoreSection = $true
-            $InsideCoreSection = $true
-            $ModifiedGraphics2 += $line
-            continue
-        }
-        
-        if ($line -match '^\[.*\]' -and $InsideCoreSection) {
-            if (-not $PauseOnFocusLostFound) {
-                $ModifiedGraphics2 += "PauseOnFocusLost = False"
-            }
-            $InsideCoreSection = $false
-        }
-        
-        if ($line -match '^PauseOnFocusLost\s*=') {
-            $PauseOnFocusLostFound = $true
-            $ModifiedGraphics2 += "PauseOnFocusLost = False"
-            continue
-        }
-        
-        $ModifiedGraphics2 += $line
-    }
-
-    if ($HasCoreSection -and $InsideCoreSection -and -not $PauseOnFocusLostFound) {
-        $ModifiedGraphics2 += "PauseOnFocusLost = False"
-    }
-
-    if (-not $HasCoreSection) {
-        $ModifiedGraphics2 += ""
-        $ModifiedGraphics2 += "[Core]"
-        $ModifiedGraphics2 += "PauseOnFocusLost = False"
-    }
-
-    $ModifiedGraphics = $ModifiedGraphics2
-
-    # Write Graphics INI (GFX.ini)
-    try {
-        $Utf8NoBom = New-Object System.Text.UTF8Encoding $false
-        [System.IO.File]::WriteAllLines($GraphicsIniPath, $ModifiedGraphics, $Utf8NoBom)
-        Write-Host "  Instance $i : RenderToMain disabled (render when minimized)" -ForegroundColor Green
-    }
-    catch {
-        Write-Host "  Instance $i : ERROR writing GFX.ini: $_" -ForegroundColor Red
-    }
-
-    # --- Disable audio: add [DSP] Backend = No audio to Dolphin.ini ---
-    $HasDspSection = $false
-    $ModifiedForAudio = @()
-    $InsideDspSection = $false
-    $BackendFound = $false
-
-    foreach ($line in $ModifiedContent) {
-        if ($line -match '^\[DSP\]') {
-            $HasDspSection = $true
-            $InsideDspSection = $true
-            $ModifiedForAudio += $line
-            continue
-        }
-        if ($line -match '^\[.*\]' -and $InsideDspSection) {
-            if (-not $BackendFound) {
-                # Insert mute settings before the next section
-                $ModifiedForAudio += "Backend = No audio"
-                $ModifiedForAudio += "Volume = 0"
-            }
-            $InsideDspSection = $false
-        }
-        if ($line -match '^Backend\s*=') {
-            $BackendFound = $true
-            # Override whatever backend was set with No audio
-            $ModifiedForAudio += "Backend = No audio"
-            continue
-        }
-        if ($line -match '^Volume\s*=') {
-            # Override volume to 0 as a safety net
-            $ModifiedForAudio += "Volume = 0"
-            continue
-        }
-        $ModifiedForAudio += $line
-    }
-
-    # If [DSP] was the last section (no closing section found after it)
-    if ($HasDspSection -and $InsideDspSection -and -not $BackendFound) {
-        $ModifiedForAudio += "Backend = No audio"
-        $ModifiedForAudio += "Volume = 0"
-    }
-
-    # If [DSP] section did not exist at all, append it
-    if (-not $HasDspSection) {
-        $ModifiedForAudio += ""
-        $ModifiedForAudio += "[DSP]"
-        $ModifiedForAudio += "Backend = No audio"
-        $ModifiedForAudio += "Volume = 0"
-    }
-
-    $ModifiedContent = $ModifiedForAudio
-
-    # Write Dolphin INI (Dolphin.ini)
-    try {
-        $Utf8NoBom = New-Object System.Text.UTF8Encoding $false
-        [System.IO.File]::WriteAllLines($DolphinIniPath, $ModifiedContent, $Utf8NoBom)
-        Write-Host "  Instance $i : Audio muted (No audio backend)" -ForegroundColor Green
-    }
-    catch {
-        Write-Host "  Instance $i : ERROR writing Dolphin.ini: $_" -ForegroundColor Red
-    }
-}
-
-Write-Host "Dolphin INI configuration complete" -ForegroundColor Green
-Write-Host ""
-
-# Launch instances quickly
-Write-Host "`nQuick launch of instances..." -ForegroundColor Cyan
-$instances = @()
-
-for ($i = 0; $i -lt $options.Count; $i++) {
-    # Determine which User profile to use
-    # Index 0 uses "User", others use "User1", "User2", etc.
-    # Profiles must already exist (created by Dolphin or manually)
-    
-    if ($i -ge $profiles.Count) {
-        Write-Host "  [$($i+1)/$($options.Count)] ERROR: Not enough User profiles!" -ForegroundColor Red
-        Write-Host "    Requested: $($options.Count) profiles" -ForegroundColor Yellow
-        Write-Host "    Available: $($profiles.Count) profiles" -ForegroundColor Yellow
-        Write-Host ""
-        Write-Host "SOLUTION: Create additional User profiles manually:" -ForegroundColor Yellow
-        Write-Host "  1. Copy the 'User' folder in Dolphin directory" -ForegroundColor Yellow
-        Write-Host "  2. Rename copies to: User1, User2, User3..." -ForegroundColor Yellow
-        Write-Host "  3. Run script again" -ForegroundColor Yellow
-        continue
-    }
-    
-    $userProfile = $profiles[$i]
-    Write-Host "  [$($i+1)/$($options.Count)] Launching with $($userProfile.Name)..." -NoNewline
-    
-    $instance = Start-DolphinInstance -UserProfile $userProfile.Name -Index ($i)
-    
-    if ($null -ne $instance) {
-        $instances += $instance
-        Write-Host " OK (PID: $($instance.Process.Id))" -ForegroundColor Green
-
-        # Write PID
-        if ($NoGUI) {
-            # Determine PID file path (use PidDirectory if provided)
-            if ([string]::IsNullOrEmpty($PidDirectory)) {
-                # Fallback: script directory
-                $pidFile = Join-Path $PSScriptRoot "dolphin_pid_$($i).tmp"
-            }
-            else {
-                # Use provided temp directory
-                # Ensure directory exists
-                if (-not (Test-Path $PidDirectory -PathType Container)) {
-                    New-Item -ItemType Directory -Path $PidDirectory -Force | Out-Null
-                    Write-Host "  Created PID directory: $PidDirectory" -ForegroundColor Gray
-                }
-                $pidFile = Join-Path $PidDirectory "dolphin_pid_$($i).tmp"
-            }
-            
-            try {
-                # Write PID with explicit encoding and force flush
-                $instance.Process.Id | Out-File -FilePath $pidFile -Encoding ASCII -Force
-                
-                # Verify file was created
-                if (Test-Path $pidFile) {
-                    Write-Host "  PID file created: $pidFile" -ForegroundColor DarkGray
-                }
-                else {
-                    Write-Host "  WARNING: PID file NOT created: $pidFile" -ForegroundColor Yellow
-                }
-            }
-            catch {
-                Write-Host "  ERROR writing PID file: $_" -ForegroundColor Red
-            }
-        }
+    $inst = Start-DolphinInstance -Index $i `
+                                  -DolphinExe $DolphinExePath `
+                                  -DolphinDir $DolphinDir `
+                                  -RomPath $RomFilePath
+    if ($inst) {
+        Write-Host "OK (PID $($inst.Process.Id))" -ForegroundColor Green
+        $instances.Add($inst)
+        if ($NoGUI) { Write-PidFile -Index $i -ProcessId $inst.Process.Id }
     }
     else {
-        Write-Host " FAILED" -ForegroundColor Red
-        
-        # Create PID file with -1 to signal failure
-        if ($NoGUI) {
-            # Use same logic as success case
-            if ([string]::IsNullOrEmpty($PidDirectory)) {
-                $pidFile = Join-Path $PSScriptRoot "dolphin_pid_$($i).tmp"
-            }
-            else {
-                if (-not (Test-Path $PidDirectory -PathType Container)) {
-                    New-Item -ItemType Directory -Path $PidDirectory -Force | Out-Null
-                }
-                $pidFile = Join-Path $PidDirectory "dolphin_pid_$($i).tmp"
-            }
-            
-            "-1" | Out-File -FilePath $pidFile -Encoding ASCII -Force
-            Write-Host "  Failure PID file created: $pidFile" -ForegroundColor DarkGray
-        }
+        Write-Host "FAILED" -ForegroundColor Red
+        if ($NoGUI) { Write-PidFile -Index $i -ProcessId -1 }
     }
 }
-
 
 if ($instances.Count -eq 0) {
-    Write-Host "`nAucune instance lancee avec succes" -ForegroundColor Red
+    Write-Err "No instance launched successfully"
     exit 1
 }
 
-# Attendre que les fenetres se creent
-Write-Host "`nAttente de $($options.InitialDelay) secondes pour la creation des fenetres..." -ForegroundColor Cyan
+# ---- Step 9 : wait + rename windows ----------------------------------------
+Write-Info "Waiting $($options.InitialDelay)s for windows to appear..."
 Start-Sleep -Seconds $options.InitialDelay
 
-# Renommer les fenetres
-Write-Host "`nRenommage des fenetres..." -ForegroundColor Cyan
-$searchTerm = [System.IO.Path]::GetFileNameWithoutExtension($Config.RomPath)
-
-foreach ($instance in $instances) {
-    Write-Host "`n  Instance $($instance.Index) (PID: $($instance.Process.Id)):" -ForegroundColor Yellow
-    
-    $success = Find-AndRenameWindow -ProcessId $instance.Process.Id `
-                                     -SearchTerm $searchTerm `
-                                     -NewTitle $instance.Title `
-                                     -TimeoutSeconds $Config.WindowTimeout `
-                                     -MinimizeDolphin $options.MinimizeDolphin `
-                                     -MinimizeGame $options.MinimizeGame
-    
-    if (-not $success) {
-        Write-Host "    TIMEOUT - Fenetre non trouvee ou non renommee" -ForegroundColor Red
+Write-Info "Renaming windows..."
+foreach ($inst in $instances) {
+    $ok = Rename-DolphinWindow -ProcessId $inst.Process.Id `
+                               -NewTitle $inst.Title `
+                               -TimeoutSec $Script:WindowTimeoutSec `
+                               -MinimizeMenu $options.MinimizeDolphin `
+                               -MinimizeGame $options.MinimizeGame
+    if ($ok) {
+        Write-Ok  "  $($inst.Title) (PID $($inst.Process.Id)) renamed"
+    } else {
+        Write-Warn2 "  $($inst.Title) (PID $($inst.Process.Id)) rename TIMEOUT"
     }
 }
 
-Write-Host "`nLancement termine : $($instances.Count) instance(s) active(s)" -ForegroundColor Green
-Write-Host ""
-
-# ============================================================
-# CLEANUP: Remove GBA/Saves folders created by Dolphin on startup
-# Dolphin re-creates them during initialization even after pre-launch cleanup.
-# We clean them again here, after window detection confirms Dolphin is fully ready.
-# ============================================================
-Write-Host "Waiting for Dolphin to finish initializing before GBA cleanup..." -ForegroundColor Cyan
+# ---- Step 10 : final cleanup -----------------------------------------------
+Write-Info "Waiting 6s for Dolphin init to settle, then cleaning GBA folders..."
 Start-Sleep -Seconds 6
+Remove-EmptyGbaFolders -DolphinDir $DolphinDir -Count $options.Count
+Remove-PhantomDesktopFolders
 
-Write-Host "Cleaning up GBA folders created by Dolphin initialization..." -ForegroundColor Cyan
-$DolphinDirClean = Split-Path -Parent $Config.DolphinPath
+Write-Ok "Launch complete: $($instances.Count) active instance(s)"
 
-for ($i = 0; $i -lt $options.Count; $i++) {
-    $UserFolderName = if ($i -eq 0) { "User" } else { "User$i" }
-    $UserFolderPath = Join-Path $DolphinDirClean $UserFolderName
-    $GbaFolder      = Join-Path $UserFolderPath "GBA"
-
-    if (-not (Test-Path $GbaFolder -PathType Container)) { continue }
-
-    $GbaFiles = Get-ChildItem -Path $GbaFolder -Recurse -File -ErrorAction SilentlyContinue
-    if ($GbaFiles.Count -gt 0) {
-        Write-Host "  Instance $i ($UserFolderName): GBA has $($GbaFiles.Count) file(s) — kept" -ForegroundColor DarkGray
-        continue
-    }
-
-    # First attempt
-    Remove-Item -Path $GbaFolder -Recurse -Force -ErrorAction SilentlyContinue
-
-    if (Test-Path $GbaFolder) {
-        # Second attempt after short wait (folder was still locked by Dolphin)
-        Start-Sleep -Seconds 3
-        Remove-Item -Path $GbaFolder -Recurse -Force -ErrorAction SilentlyContinue
-    }
-
-    if (Test-Path $GbaFolder) {
-        Write-Host "  Instance $i ($UserFolderName): GBA folder still locked by Dolphin — will remain" -ForegroundColor Yellow
-    } else {
-        Write-Host "  Instance $i ($UserFolderName): GBA folder removed" -ForegroundColor DarkGray
-    }
-}
-Write-Host "GBA cleanup complete" -ForegroundColor Green
-Write-Host ""
-
-# ============================================================
-# CLEANUP: Remove phantom "Monster Hunter" folder on Desktop
-# Dolphin sometimes creates a GBA/Saves directory tree at an old/stale path
-# stored in its config files (especially after folder renames).
-# This step removes ONLY empty phantom directory trees on the Desktop.
-# ============================================================
-$DesktopPhantom = Join-Path $env:USERPROFILE "Desktop\Monster Hunter"
-if (Test-Path $DesktopPhantom -PathType Container) {
-    # Safety check: only remove if the folder tree is entirely empty (no real files)
-    $PhantomFiles = Get-ChildItem -Path $DesktopPhantom -Recurse -File -ErrorAction SilentlyContinue
-    if ($PhantomFiles.Count -eq 0) {
-        Remove-Item -Path $DesktopPhantom -Recurse -Force -ErrorAction SilentlyContinue
-        if (-not (Test-Path $DesktopPhantom)) {
-            Write-Host "Cleaned up phantom 'Monster Hunter' folder from Desktop" -ForegroundColor DarkGray
-        } else {
-            Write-Host "WARNING: Could not remove phantom 'Monster Hunter' folder from Desktop (locked)" -ForegroundColor Yellow
-        }
-    } else {
-        Write-Host "NOTE: 'Monster Hunter' folder on Desktop contains files — not removed" -ForegroundColor DarkGray
-    }
-}
-
-# MODE INTERACTIF : Afficher panneau de controle
+# ---- Step 11 : control panel (GUI) or hand back to Python (NoGUI) ----------
 if (-not $NoGUI) {
     Show-ControlPanel -Instances $instances
-    Write-Host "`nScript termine" -ForegroundColor Cyan
-    
-    # Auto-close CMD window after 60 seconds
-    Write-Host ""
-    Write-Host "Cette fenetre se fermera automatiquement dans 60 secondes..." -ForegroundColor Yellow
-    Write-Host "Appuyez sur une touche pour fermer maintenant" -ForegroundColor Gray
-    
-    # Wait for keypress or 60 second timeout
-    $timeout = 60
-    $startTime = Get-Date
-    
-    while (((Get-Date) - $startTime).TotalSeconds -lt $timeout) {
-        if ([Console]::KeyAvailable) {
-            [Console]::ReadKey($true) | Out-Null
-            Write-Host "Fermeture manuelle..." -ForegroundColor Green
-            break
-        }
+
+    Write-Info "Auto-close in 60s (press any key to close now)"
+    $start = Get-Date
+    while (((Get-Date) - $start).TotalSeconds -lt 60) {
+        if ([Console]::KeyAvailable) { [Console]::ReadKey($true) | Out-Null; break }
         Start-Sleep -Milliseconds 100
     }
-    
-    if (((Get-Date) - $startTime).TotalSeconds -ge $timeout) {
-        Write-Host "`nTimeout atteint - Fermeture automatique" -ForegroundColor Yellow
-    }
 }
-
-# MODE AUTOMATIQUE : Pas de panneau, Python prend le relais
 else {
-    Write-Host "Mode automatique : Python reprend le controle" -ForegroundColor Green
+    Write-Ok "NoGUI mode: handing control back to Python"
 }
-
-#endregion
